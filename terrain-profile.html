@@ -1010,17 +1010,24 @@ const map = L.map('map', {
   attributionControl: true,
 }).setView([46.5197, 6.6323], 9); // Default: Lausanne — will be overridden by IP location guess below
 
-// Tile layers. Esri's free tile services are used for both — no API key
-// required, no Referer header required (works from file:// URLs), reliable
-// globally. We offer two views:
-//   - Topo: contour-style shading, ideal for path planning over terrain
-//   - Satellite: aerial imagery, useful to see whether obstacles are forest,
-//     buildings, water, or bare ground
+// Tile layers. Esri's free tile services are used — no API key required, no
+// Referer header required (works from file:// URLs), reliable globally.
+//   - Topographic: contour-style, default for light theme
+//   - Dark Canvas: dark neutral basemap, used when theme is dark
+//   - Satellite: aerial imagery, works in either theme
 const topoLayer = L.tileLayer(
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
   {
     maxZoom: 19,
     attribution: 'Tiles © Esri — Esri, DeLorme, NAVTEQ, TomTom, USGS, NGA',
+    crossOrigin: true,
+  }
+);
+const darkLayer = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+  {
+    maxZoom: 16,
+    attribution: 'Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap contributors',
     crossOrigin: true,
   }
 );
@@ -1032,9 +1039,8 @@ const satelliteLayer = L.tileLayer(
     crossOrigin: true,
   }
 );
-// Place labels overlay for use with satellite imagery — without it, satellite
-// view is hard to navigate (no city/road names). Esri's reference layer is
-// transparent and works well as an overlay.
+// Place labels overlay for use with satellite imagery (and dark canvas, which
+// has minimal built-in labels). Esri's reference layer is transparent.
 const labelsLayer = L.tileLayer(
   'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
   {
@@ -1045,21 +1051,39 @@ const labelsLayer = L.tileLayer(
   }
 );
 
-topoLayer.on('tileerror', (e) => console.warn('Topo tile error', e));
-satelliteLayer.on('tileerror', (e) => console.warn('Satellite tile error', e));
+[topoLayer, darkLayer, satelliteLayer].forEach(layer =>
+  layer.on('tileerror', (e) => console.warn('Tile error', e))
+);
 
-// Default to topo view
+// We start with topo (the light-theme default). The theme system will swap to
+// the dark layer if the user has dark theme saved or selects it later.
 topoLayer.addTo(map);
 
-// Leaflet's built-in layer control — small box top-right with a radio selector
+// Leaflet's built-in layer control — radio selector for base layers
 const baseLayers = {
   'Topographic': topoLayer,
+  'Dark Canvas': darkLayer,
   'Satellite': satelliteLayer,
 };
 const overlays = {
   'Place Labels': labelsLayer,
 };
 L.control.layers(baseLayers, overlays, { position: 'topright', collapsed: true }).addTo(map);
+
+// Swap basemap when the theme changes. We only swap if the user is currently
+// on the "themed" basemap (topo or dark canvas) — if they explicitly picked
+// satellite, leave their choice alone.
+function syncBasemapToTheme(themeName) {
+  const isDark = themeName === 'dark';
+  const wantedLayer = isDark ? darkLayer : topoLayer;
+  const otherThemed = isDark ? topoLayer : darkLayer;
+  // Only swap if the "other themed" layer is the current one. If satellite is
+  // selected, leave it alone.
+  if (map.hasLayer(otherThemed)) {
+    map.removeLayer(otherThemed);
+    wantedLayer.addTo(map);
+  }
+}
 
 // ─── INITIAL LOCATION GUESS ─────────────────────────────
 // Try to put the map roughly where the user is on first load, using their IP
@@ -2349,16 +2373,18 @@ function applyFontScale() {
 }
 
 function applyTheme(themeName) {
-  // 'light' or 'dark' (default). Adds/removes a class on <html>.
+  // 'light' or 'dark'. Adds/removes a class on <html>.
   const isLight = themeName === 'light';
   document.documentElement.classList.toggle('theme-light', isLight);
   // Update button icon: sun on dark theme (click for light), moon on light
   const btn = document.getElementById('btn-theme');
   if (btn) btn.textContent = isLight ? '☾' : '☼';
   try { localStorage.setItem(THEME_KEY, themeName); } catch {}
+  // Swap the basemap to match (unless the user is on satellite)
+  if (typeof syncBasemapToTheme === 'function') syncBasemapToTheme(themeName);
   // Re-render the chart if it's open — Chart.js doesn't observe CSS variables,
   // so we need to rebuild it to pick up the new colors.
-  if (state.chart && typeof lastChartArgs !== 'undefined' && lastChartArgs) {
+  if (state.chart && lastChartArgs) {
     renderChart(...lastChartArgs);
   }
 }
