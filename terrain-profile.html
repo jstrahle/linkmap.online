@@ -1918,12 +1918,15 @@ function environmentLoss(env, freqMHz) {
 //   < 6 dB:  essentially free-space conditions
 //   6-15 dB: mild diffraction, common for slightly obstructed paths
 //   15-25 dB: significant diffraction, needs good equipment
-//   > 25 dB: severe diffraction, path is challenging
+//   25-40 dB: marginal — may work under favorable atmospheric conditions
+//             (super-refraction, ducting) but unreliable
+//   > 40 dB: severe, path is unlikely to work
 function classifyPath(diffractionDb) {
   if (diffractionDb < 6)  return { label: 'Clear Path',        cls: 'go' };
   if (diffractionDb < 15) return { label: 'Light Obstruction', cls: 'go' };
   if (diffractionDb < 25) return { label: 'Heavy Obstruction', cls: 'maybe' };
-  return                  { label: 'Severe Obstruction',       cls: 'no' };
+  if (diffractionDb < 40) return { label: 'Marginal',          cls: 'maybe' };
+  return                         { label: 'Severe Obstruction', cls: 'no' };
 }
 
 // ─── ANALYSIS ───────────────────────────────────────────
@@ -2057,8 +2060,10 @@ async function runAnalysis() {
       }
     } else if (totalLoss < 25) {
       verdictDetail = `Path costs ~${totalLoss.toFixed(1)} dB excess loss above free space at ${freqMHz} MHz (${diffractionLoss.toFixed(1)} dB diffraction${obstacleCountNote}, worst obstacle ${obsKm}km from A).${clutterNote} Workable but needs good equipment and adequate transmit power.`;
+    } else if (totalLoss < 40) {
+      verdictDetail = `Marginal path with ~${totalLoss.toFixed(1)} dB excess loss above free space at ${freqMHz} MHz (${diffractionLoss.toFixed(1)} dB diffraction${obstacleCountNote}, worst obstacle ${obsKm}km from A).${clutterNote} May work under favorable atmospheric conditions (super-refraction, ducting) but reliability depends on weather. Higher antennas or a relay would make it dependable.`;
     } else {
-      verdictDetail = `Severe excess loss: ~${totalLoss.toFixed(1)} dB above free space at ${freqMHz} MHz (${diffractionLoss.toFixed(1)} dB diffraction${obstacleCountNote}).${clutterNote} Challenging — consider a relay, higher antennas, or lower frequency.`;
+      verdictDetail = `Severe excess loss: ~${totalLoss.toFixed(1)} dB above free space at ${freqMHz} MHz (${diffractionLoss.toFixed(1)} dB diffraction${obstacleCountNote}).${clutterNote} Unlikely to work without a relay, much higher antennas, or a substantially lower frequency.`;
     }
 
     // Fresnel radius at midpoint (representative)
