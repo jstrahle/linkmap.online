@@ -28,7 +28,7 @@
 
   License: MIT (or as configured in repository)
 -->
-<html lang="en">
+<html lang="en" class="theme-light">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
@@ -57,7 +57,30 @@
     --danger: #c4604a;
     --plot-terrain: #5a4530;
     --plot-terrain-fill: #2d2218;
+    --overlay-bg: rgba(13,16,15,0.92);
+    --overlay-bg-soft: rgba(13,16,15,0.85);
     --font-scale: 1;
+  }
+
+  /* High-contrast light theme. Triggered by adding .theme-light to <html>.
+   * Same variable names, just remapped — every styled element already uses
+   * var(--...) so no other CSS changes are needed. */
+  html.theme-light {
+    --bg: #fafaf7;
+    --bg-2: #ffffff;
+    --panel: #f0f0eb;
+    --line: #c8c8c0;
+    --ink: #1a1a17;
+    --ink-dim: #555550;
+    --ink-faint: #888880;
+    --amber: #a06b1a;
+    --amber-bright: #c08828;
+    --signal: #2f7a2f;
+    --danger: #a8341a;
+    --plot-terrain: #8a6a3f;
+    --plot-terrain-fill: #d4c4a0;
+    --overlay-bg: rgba(255,255,255,0.95);
+    --overlay-bg-soft: rgba(255,255,255,0.88);
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -221,7 +244,7 @@
   }
   .leaflet-container { background: #1a1f1c; font-family: 'JetBrains Mono', monospace; }
   .leaflet-control-attribution {
-    background: rgba(13,16,15,0.85) !important;
+    background: var(--overlay-bg-soft) !important;
     color: var(--ink-faint) !important;
     font-size: 9px !important;
     padding: 2px 6px !important;
@@ -236,7 +259,7 @@
   }
   .leaflet-control-zoom a:hover { background: var(--panel) !important; color: var(--amber) !important; }
   .leaflet-control-layers {
-    background: rgba(13,16,15,0.92) !important;
+    background: var(--overlay-bg) !important;
     border: 1px solid var(--line) !important;
     border-radius: 0 !important;
     color: var(--ink) !important;
@@ -251,6 +274,10 @@
     background-position: center !important;
     background-repeat: no-repeat !important;
     border: 1px solid var(--line) !important;
+  }
+  /* Light theme uses a dark icon */
+  html.theme-light .leaflet-control-layers-toggle {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%231a1a17' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polygon points='12 2 2 7 12 12 22 7 12 2'></polygon><polyline points='2 17 12 22 22 17'></polyline><polyline points='2 12 12 17 22 12'></polyline></svg>") !important;
   }
   .leaflet-control-layers-expanded {
     padding: 10px 14px !important;
@@ -276,7 +303,7 @@
     top: 16px;
     left: 16px;
     z-index: 500;
-    background: rgba(13,16,15,0.92);
+    background: var(--overlay-bg);
     border: 1px solid var(--line);
     padding: 12px 16px;
     backdrop-filter: blur(8px);
@@ -313,7 +340,7 @@
     gap: 8px;
   }
   .map-btn {
-    background: rgba(13,16,15,0.92);
+    background: var(--overlay-bg);
     border: 1px solid var(--line);
     color: var(--ink-dim);
     font-family: 'JetBrains Mono', monospace;
@@ -338,7 +365,7 @@
     width: 38px;
     height: 38px;
     padding: 0;
-    background: rgba(13,16,15,0.92);
+    background: var(--overlay-bg);
     border: 1px solid var(--line);
     color: var(--ink-dim);
     cursor: pointer;
@@ -637,7 +664,7 @@
   .loader-overlay {
     position: absolute;
     inset: 0;
-    background: rgba(13,16,15,0.85);
+    background: var(--overlay-bg-soft);
     backdrop-filter: blur(4px);
     display: none;
     align-items: center;
@@ -794,6 +821,7 @@ window.addEventListener('load', () => {
   <div class="font-controls" role="group" aria-label="Adjust text size">
     <button class="font-btn" id="btn-font-down" title="Decrease text size" aria-label="Decrease text size">A−</button>
     <button class="font-btn" id="btn-font-up" title="Increase text size" aria-label="Increase text size">A+</button>
+    <button class="font-btn" id="btn-theme" title="Toggle light / dark theme" aria-label="Toggle theme">☼</button>
   </div>
 </div>
 
@@ -972,6 +1000,9 @@ const state = {
   hoverMarker: null,       // marker that follows the chart cursor
   obstacleMarkers: [],     // markers on Deygout obstacle locations
 };
+
+// Last args passed to renderChart, so we can re-render when the theme changes.
+let lastChartArgs = null;
 
 // ─── MAP SETUP ──────────────────────────────────────────
 const map = L.map('map', {
@@ -1351,6 +1382,7 @@ function clearAll() {
   document.getElementById('chart-empty').style.display = 'flex';
   document.getElementById('profile-chart').style.display = 'none';
   if (state.chart) { state.chart.destroy(); state.chart = null; }
+  lastChartArgs = null;
   document.getElementById('meta-samples').textContent = '—';
   // Clear chart-hover marker and worst-obstacle marker
   if (state.hoverMarker) { map.removeLayer(state.hoverMarker); state.hoverMarker = null; }
@@ -2070,6 +2102,7 @@ async function runAnalysis() {
 
 // ─── CHART ──────────────────────────────────────────────
 function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp, fresnelLow, earthCurve, samples, worstObstacleDist) {
+  lastChartArgs = [distances, elevations, terrainAdjusted, losLine, fresnelUp, fresnelLow, earthCurve, samples, worstObstacleDist];
   document.getElementById('chart-empty').style.display = 'none';
   const canvas = document.getElementById('profile-chart');
   canvas.style.display = 'block';
@@ -2084,6 +2117,34 @@ function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp,
   const range = allHigh - allLow;
   const yMin = allLow - range * 0.05;
 
+  // Read theme-aware colors so the chart matches the current theme. Chart.js
+  // doesn't observe CSS variables, so we snapshot the resolved values here.
+  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const themeColors = {
+    bg:      cssVar('--bg'),
+    line:    cssVar('--line'),
+    ink:     cssVar('--ink'),
+    inkDim:  cssVar('--ink-dim'),
+    amber:   cssVar('--amber'),
+    signal:  cssVar('--signal'),
+    danger:  cssVar('--danger'),
+    terrain: cssVar('--plot-terrain'),
+  };
+
+  // Helper: turn a CSS color (#rrggbb or named) into an rgba string at the
+  // requested alpha. Used both for canvas drawing in the plugin and for
+  // Chart.js dataset colors.
+  function withAlpha(cssColor, alpha) {
+    const probe = document.createElement('div');
+    probe.style.color = cssColor;
+    document.body.appendChild(probe);
+    const rgb = getComputedStyle(probe).color; // "rgb(r, g, b)"
+    document.body.removeChild(probe);
+    const m = rgb.match(/\d+/g);
+    if (!m || m.length < 3) return cssColor;
+    return `rgba(${m[0]}, ${m[1]}, ${m[2]}, ${alpha})`;
+  }
+
   const ctx = canvas.getContext('2d');
 
   // Chart.js plugin to draw a dashed vertical line at the worst-obstacle
@@ -2097,20 +2158,24 @@ function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp,
       const x = scales.x.getPixelForValue(worstObstacleDist / 1000);
       if (x < chartArea.left || x > chartArea.right) return;
       ctx.save();
-      ctx.strokeStyle = 'rgba(196, 96, 74, 0.6)';
+      ctx.strokeStyle = withAlpha(themeColors.danger, 0.6);
       ctx.setLineDash([3, 3]);
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(x, chartArea.top);
       ctx.lineTo(x, chartArea.bottom);
       ctx.stroke();
-      ctx.fillStyle = '#c4604a';
+      ctx.fillStyle = themeColors.danger;
       ctx.font = '10px JetBrains Mono';
       ctx.textAlign = 'center';
-      ctx.fillText('worst obstacle', x, chartArea.top - 4);
+      ctx.textBaseline = 'top';
+      // Draw label INSIDE the plot area, just below the top edge, so it can't
+      // be clipped by the chart container or overlap the legend above.
+      ctx.fillText('worst obstacle', x, chartArea.top + 4);
       ctx.restore();
     },
   };
+
 
   state.chart = new Chart(ctx, {
     type: 'line',
@@ -2122,8 +2187,8 @@ function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp,
         {
           label: 'Fresnel Upper',
           data: fresnelUp,
-          borderColor: 'rgba(111,174,111,0.4)',
-          backgroundColor: 'rgba(111,174,111,0.08)',
+          borderColor: withAlpha(themeColors.signal, 0.4),
+          backgroundColor: withAlpha(themeColors.signal, 0.08),
           borderWidth: 1,
           fill: '+1', // fill toward next dataset (fresnel lower)
           pointRadius: 0,
@@ -2133,7 +2198,7 @@ function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp,
         {
           label: 'Fresnel Lower',
           data: fresnelLow,
-          borderColor: 'rgba(111,174,111,0.4)',
+          borderColor: withAlpha(themeColors.signal, 0.4),
           borderWidth: 1,
           pointRadius: 0,
           fill: false,
@@ -2143,7 +2208,7 @@ function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp,
         {
           label: 'Line of Sight',
           data: losLine,
-          borderColor: '#d4a04a',
+          borderColor: themeColors.amber,
           borderWidth: 2,
           pointRadius: 0,
           fill: false,
@@ -2152,21 +2217,20 @@ function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp,
         // Earth curve (relative to LOS midline, dashed reference)
         {
           label: 'Earth Curve',
-          data: earthCurve.map((b, i) => elevations[0] + b), // shown above the start elevation
-          borderColor: 'rgba(138,141,128,0.5)',
+          data: earthCurve.map((b, i) => elevations[0] + b),
+          borderColor: withAlpha(themeColors.inkDim, 0.5),
           borderWidth: 1,
           borderDash: [4, 4],
           pointRadius: 0,
           fill: false,
           tension: 0,
-          hidden: false,
         },
         // Terrain (filled) — adjusted with earth bulge so LOS stays straight
         {
           label: 'Terrain',
           data: terrainAdjusted,
-          borderColor: '#8a6a3f',
-          backgroundColor: 'rgba(90,69,48,0.55)',
+          borderColor: themeColors.terrain,
+          backgroundColor: withAlpha(themeColors.terrain, 0.55),
           borderWidth: 1.5,
           pointRadius: 0,
           fill: 'start',
@@ -2203,13 +2267,13 @@ function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp,
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: 'rgba(13,16,15,0.95)',
-          borderColor: '#2a312d',
+          backgroundColor: withAlpha(themeColors.bg, 0.95),
+          borderColor: themeColors.line,
           borderWidth: 1,
           titleFont: { family: 'JetBrains Mono', size: 11, weight: '500' },
           bodyFont: { family: 'JetBrains Mono', size: 11 },
-          titleColor: '#d4a04a',
-          bodyColor: '#e8e4d8',
+          titleColor: themeColors.amber,
+          bodyColor: themeColors.ink,
           padding: 10,
           cornerRadius: 0,
           displayColors: true,
@@ -2223,23 +2287,23 @@ function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp,
       scales: {
         x: {
           type: 'linear',
-          title: { display: true, text: 'DISTANCE FROM A (km)', font: { family: 'JetBrains Mono', size: 9, weight: '400' }, color: '#8a8d80' },
+          title: { display: true, text: 'DISTANCE FROM A (km)', font: { family: 'JetBrains Mono', size: 9, weight: '400' }, color: themeColors.inkDim },
           ticks: {
-            color: '#8a8d80',
+            color: themeColors.inkDim,
             font: { family: 'JetBrains Mono', size: 10 },
             callback: (v) => v.toFixed(1),
           },
-          grid: { color: 'rgba(42,49,45,0.6)', drawBorder: false },
+          grid: { color: withAlpha(themeColors.line, 0.6), drawBorder: false },
         },
         y: {
           min: yMin,
-          title: { display: true, text: 'ELEVATION (m)', font: { family: 'JetBrains Mono', size: 9, weight: '400' }, color: '#8a8d80' },
+          title: { display: true, text: 'ELEVATION (m)', font: { family: 'JetBrains Mono', size: 9, weight: '400' }, color: themeColors.inkDim },
           ticks: {
-            color: '#8a8d80',
+            color: themeColors.inkDim,
             font: { family: 'JetBrains Mono', size: 10 },
             callback: (v) => Math.round(v),
           },
-          grid: { color: 'rgba(42,49,45,0.6)', drawBorder: false },
+          grid: { color: withAlpha(themeColors.line, 0.6), drawBorder: false },
         },
       },
     },
@@ -2266,34 +2330,61 @@ updatePointDisplays();
 const restored = decodeStateFromHash();
 if (restored) userHasInteracted = true;
 
-// ─── FONT SCALING ───────────────────────────────────────
-// Discrete scale steps for text in the side panel. Bounded so users can't
-// scale into unusable territory. The chosen scale persists across sessions.
+// ─── USER PREFERENCES ───────────────────────────────────
+// Font size and theme are persisted in localStorage so they carry across
+// sessions. Both apply via CSS — font scale through the --font-scale variable,
+// theme by toggling .theme-light on <html> which remaps the color variables.
+
 const FONT_SCALES = [1.0, 1.15, 1.3, 1.5, 1.75];
 const FONT_SCALE_KEY = 'tp-font-scale';
+const THEME_KEY = 'tp-theme';
 let fontScaleIdx = 0;
 
 function applyFontScale() {
   const scale = FONT_SCALES[fontScaleIdx];
   document.documentElement.style.setProperty('--font-scale', scale);
-  // Disable the +/- buttons at the extremes so the user gets visual feedback
   document.getElementById('btn-font-down').disabled = (fontScaleIdx === 0);
   document.getElementById('btn-font-up').disabled = (fontScaleIdx === FONT_SCALES.length - 1);
   try { localStorage.setItem(FONT_SCALE_KEY, String(fontScaleIdx)); } catch {}
 }
 
-// Restore saved scale, if any
+function applyTheme(themeName) {
+  // 'light' or 'dark' (default). Adds/removes a class on <html>.
+  const isLight = themeName === 'light';
+  document.documentElement.classList.toggle('theme-light', isLight);
+  // Update button icon: sun on dark theme (click for light), moon on light
+  const btn = document.getElementById('btn-theme');
+  if (btn) btn.textContent = isLight ? '☾' : '☼';
+  try { localStorage.setItem(THEME_KEY, themeName); } catch {}
+  // Re-render the chart if it's open — Chart.js doesn't observe CSS variables,
+  // so we need to rebuild it to pick up the new colors.
+  if (state.chart && typeof lastChartArgs !== 'undefined' && lastChartArgs) {
+    renderChart(...lastChartArgs);
+  }
+}
+
+// Restore saved preferences
 try {
   const saved = parseInt(localStorage.getItem(FONT_SCALE_KEY), 10);
   if (!isNaN(saved) && saved >= 0 && saved < FONT_SCALES.length) fontScaleIdx = saved;
 } catch {}
 applyFontScale();
 
+try {
+  const savedTheme = localStorage.getItem(THEME_KEY);
+  // Default is light; only switch to dark if explicitly saved
+  if (savedTheme === 'dark') applyTheme('dark'); else applyTheme('light');
+} catch { applyTheme('light'); }
+
 document.getElementById('btn-font-up').addEventListener('click', () => {
   if (fontScaleIdx < FONT_SCALES.length - 1) { fontScaleIdx++; applyFontScale(); }
 });
 document.getElementById('btn-font-down').addEventListener('click', () => {
   if (fontScaleIdx > 0) { fontScaleIdx--; applyFontScale(); }
+});
+document.getElementById('btn-theme').addEventListener('click', () => {
+  const next = document.documentElement.classList.contains('theme-light') ? 'dark' : 'light';
+  applyTheme(next);
 });
 </script>
 </body>
