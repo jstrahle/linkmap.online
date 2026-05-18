@@ -18,7 +18,7 @@ The verdict tells you whether the path is geometrically clear, lightly obstructe
 
 ## Screenshot
 
-*(Drop a screenshot of the app here)*
+There are no screenshots available, but you can check the live version of the application here: https://www.linkmap.online
 
 ## Quick start
 
