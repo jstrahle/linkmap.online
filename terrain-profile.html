@@ -1,0 +1,2300 @@
+<!DOCTYPE html>
+<!--
+  TERRAIN/LINK — Radio Path Profile Analyzer
+
+  Single-file web app for analyzing radio link paths between two geographic
+  points. Computes:
+    - Terrain cross-section using SRTM elevation data
+    - Earth-bulge-corrected line of sight (4/3 Earth radius)
+    - First Fresnel zone
+    - Knife-edge diffraction loss (ITU-R P.526) via the Deygout multi-edge
+      method with corrections to avoid over-counting comparable obstacles
+    - Environment clutter loss (vegetation/buildings)
+    - Free-space path loss
+    - End-to-end path loss
+
+  No build step, no API keys. Everything runs in the browser. External
+  services used (all free, no authentication):
+    - Esri ArcGIS Online (map tiles, topo + satellite)
+    - Open-Meteo (elevation, primary)
+    - Open-Elevation (elevation, fallback)
+    - Nominatim / OpenStreetMap (forward and reverse geocoding)
+    - ipapi.co / geojs.io / ipwho.is (IP-based initial location)
+
+  Dependencies (loaded from jsDelivr CDN):
+    - Leaflet 1.9.4 (map)
+    - Chart.js 4.4 (cross-section chart)
+    - Google Fonts: JetBrains Mono + Fraunces
+
+  License: MIT (or as configured in repository)
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>TERRAIN/LINK — Radio Path Profile Analyzer</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,800&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous" />
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" crossorigin="anonymous"></script>
+
+<style>
+  :root {
+    --bg: #0d100f;
+    --bg-2: #141815;
+    --panel: #1a1f1c;
+    --line: #2a312d;
+    --ink: #e8e4d8;
+    --ink-dim: #8a8d80;
+    --ink-faint: #555852;
+    --amber: #d4a04a;
+    --amber-bright: #f0c061;
+    --signal: #6fae6f;
+    --danger: #c4604a;
+    --plot-terrain: #5a4530;
+    --plot-terrain-fill: #2d2218;
+    --font-scale: 1;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    overflow: hidden;
+  }
+
+  body {
+    background-image:
+      radial-gradient(circle at 20% 0%, rgba(212,160,74,0.04) 0%, transparent 50%),
+      radial-gradient(circle at 80% 100%, rgba(111,174,111,0.03) 0%, transparent 50%);
+  }
+
+  /* ─── TOP BAR ─────────────────────────────────────────── */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 56px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-2);
+    position: relative;
+  }
+  .topbar::before {
+    content: '';
+    position: absolute;
+    bottom: -1px; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--amber) 20%, var(--amber) 80%, transparent);
+    opacity: 0.4;
+  }
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+  }
+  .brand-mark {
+    font-family: 'Fraunces', serif;
+    font-weight: 800;
+    font-size: 22px;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .brand-mark .slash { color: var(--amber); margin: 0 2px; }
+  .brand-sub {
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    color: var(--ink-dim);
+    text-transform: uppercase;
+  }
+  .topbar-meta {
+    display: flex;
+    gap: 28px;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .topbar-meta span b {
+    color: var(--amber);
+    font-weight: 500;
+    margin-left: 6px;
+    letter-spacing: 0;
+  }
+
+  /* Font size controls. Compact buttons that toggle --font-scale on body. */
+  .font-controls {
+    display: flex;
+    gap: 4px;
+    margin-left: 18px;
+  }
+  .font-btn {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    color: var(--ink-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    width: 32px;
+    height: 28px;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .font-btn:hover:not(:disabled) {
+    color: var(--amber);
+    border-color: var(--amber);
+  }
+  .font-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  /* ─── LAYOUT ──────────────────────────────────────────── */
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    grid-template-rows: 1fr 320px;
+    height: calc(100vh - 56px);
+    gap: 1px;
+    background: var(--line);
+  }
+  .pane-map { grid-column: 1; grid-row: 1; background: var(--bg-2); position: relative; }
+  .pane-side { grid-column: 2; grid-row: 1 / 3; background: var(--panel); overflow-y: auto; }
+  .pane-profile { grid-column: 1; grid-row: 2; background: var(--bg-2); position: relative; }
+
+  /* Font scaling: only apply to side panel content. We use a scoped font-size
+   * on the side pane so font-relative units (em/rem) cascade naturally.
+   * We deliberately do NOT scale: top bar, map controls, chart axes, chart
+   * legend, map overlays — these have fixed widths or layouts that would
+   * break if their text grew. The side panel content is all flex/grid based
+   * with vertical stacking, so it tolerates larger text gracefully.
+   *
+   * Within the panel, each element keeps its existing px size which we then
+   * multiply by --font-scale via calc() in the rules below. */
+  .pane-side {
+    font-size: calc(13px * var(--font-scale));
+  }
+  .pane-side .side-heading      { font-size: calc(10px * var(--font-scale)); }
+  .pane-side .endpoint-data     { font-size: calc(11px * var(--font-scale)); }
+  .pane-side .endpoint-data .label { font-size: calc(9px * var(--font-scale)); }
+  .pane-side .endpoint-data .place { font-size: calc(10px * var(--font-scale)); }
+  .pane-side .input-group label { font-size: calc(9px * var(--font-scale)); }
+  .pane-side .input-group input,
+  .pane-side .input-group select { font-size: calc(12px * var(--font-scale)); }
+  .pane-side .analyze-btn       { font-size: calc(11px * var(--font-scale)); }
+  .pane-side .verdict-label     { font-size: calc(18px * var(--font-scale)); }
+  .pane-side .verdict-detail    { font-size: calc(11px * var(--font-scale)); }
+  .pane-side .stat-label        { font-size: calc(9px * var(--font-scale)); }
+  .pane-side .stat-value        { font-size: calc(16px * var(--font-scale)); }
+  .pane-side .stat-value .unit  { font-size: calc(10px * var(--font-scale)); }
+
+  /* Expanded map: hide side panel and profile, let the map fill everything */
+  .layout.map-expanded {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+  .layout.map-expanded .pane-side,
+  .layout.map-expanded .pane-profile {
+    display: none;
+  }
+  .layout.map-expanded .pane-map {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  /* ─── MAP ─────────────────────────────────────────────── */
+  #map {
+    height: 100%;
+    width: 100%;
+    background: #1a1f1c;
+  }
+  .leaflet-container { background: #1a1f1c; font-family: 'JetBrains Mono', monospace; }
+  .leaflet-control-attribution {
+    background: rgba(13,16,15,0.85) !important;
+    color: var(--ink-faint) !important;
+    font-size: 9px !important;
+    padding: 2px 6px !important;
+  }
+  .leaflet-control-attribution a { color: var(--ink-dim) !important; }
+  .leaflet-control-zoom a {
+    background: var(--bg-2) !important;
+    color: var(--ink) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 0 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+  }
+  .leaflet-control-zoom a:hover { background: var(--panel) !important; color: var(--amber) !important; }
+  .leaflet-control-layers {
+    background: rgba(13,16,15,0.92) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 0 !important;
+    color: var(--ink) !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 11px !important;
+    backdrop-filter: blur(8px);
+  }
+  .leaflet-control-layers-toggle {
+    background-color: var(--bg-2) !important;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%23e8e4d8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polygon points='12 2 2 7 12 12 22 7 12 2'></polygon><polyline points='2 17 12 22 22 17'></polyline><polyline points='2 12 12 17 22 12'></polyline></svg>") !important;
+    background-size: 20px !important;
+    background-position: center !important;
+    background-repeat: no-repeat !important;
+    border: 1px solid var(--line) !important;
+  }
+  .leaflet-control-layers-expanded {
+    padding: 10px 14px !important;
+  }
+  .leaflet-control-layers label {
+    margin: 4px 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .leaflet-control-layers-separator {
+    border-top: 1px solid var(--line) !important;
+    margin: 8px 0 !important;
+  }
+  .leaflet-control-layers input[type="radio"],
+  .leaflet-control-layers input[type="checkbox"] {
+    accent-color: var(--amber);
+  }
+
+  .map-overlay {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    z-index: 500;
+    background: rgba(13,16,15,0.92);
+    border: 1px solid var(--line);
+    padding: 12px 16px;
+    backdrop-filter: blur(8px);
+    max-width: 280px;
+  }
+  .map-overlay-title {
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin-bottom: 6px;
+  }
+  .map-overlay-text {
+    font-size: 11px;
+    color: var(--ink-dim);
+    line-height: 1.5;
+  }
+  .map-overlay-text .key {
+    display: inline-block;
+    padding: 1px 6px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    font-size: 10px;
+    margin: 0 2px;
+  }
+
+  .map-corner {
+    position: absolute;
+    bottom: 16px;
+    left: 16px;
+    z-index: 500;
+    display: flex;
+    gap: 8px;
+  }
+  .map-btn {
+    background: rgba(13,16,15,0.92);
+    border: 1px solid var(--line);
+    color: var(--ink-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 8px 14px;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+    transition: all 0.15s;
+  }
+  .map-btn:hover { color: var(--amber); border-color: var(--amber); }
+  .map-btn.danger:hover { color: var(--danger); border-color: var(--danger); }
+
+  /* Icon-only button — square footprint, SVG inside. Positioned at bottom-
+   * right but lifted enough to clear Leaflet's attribution strip beneath. */
+  .map-btn-icon {
+    position: absolute;
+    bottom: 30px;
+    right: 12px;
+    z-index: 500;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    background: rgba(13,16,15,0.92);
+    border: 1px solid var(--line);
+    color: var(--ink-dim);
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .map-btn-icon:hover { color: var(--amber); border-color: var(--amber); }
+  .map-btn-icon svg { width: 18px; height: 18px; display: block; }
+
+  /* Custom markers via Leaflet divIcon */
+  .marker-pin {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    font-size: 12px;
+    color: var(--bg);
+    background: var(--amber);
+    border: 2px solid var(--bg);
+    box-shadow: 0 0 0 1px var(--amber), 0 4px 12px rgba(0,0,0,0.4);
+    border-radius: 50%;
+  }
+  .marker-pin.b { background: var(--signal); box-shadow: 0 0 0 1px var(--signal), 0 4px 12px rgba(0,0,0,0.4); }
+
+  /* ─── SIDE PANEL ──────────────────────────────────────── */
+  .side-section {
+    padding: 20px;
+    border-bottom: 1px solid var(--line);
+  }
+  .side-heading {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .side-heading::before {
+    content: '';
+    width: 6px; height: 6px;
+    background: var(--amber);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--amber);
+  }
+
+  .endpoint-row {
+    display: grid;
+    grid-template-columns: 16px 1fr;
+    gap: 10px;
+    margin-bottom: 12px;
+    align-items: start;
+  }
+  .endpoint-marker {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    margin-top: 2px;
+  }
+  .endpoint-marker.a { background: var(--amber); }
+  .endpoint-marker.b { background: var(--signal); }
+  .endpoint-data { font-size: 11px; line-height: 1.5; }
+  .endpoint-data .label { color: var(--ink-dim); text-transform: uppercase; font-size: 9px; letter-spacing: 0.12em; }
+  .endpoint-data .val { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .endpoint-data .val.empty { color: var(--ink-faint); font-style: italic; }
+  .endpoint-data .place {
+    color: var(--ink-dim);
+    font-size: 10px;
+    margin-top: 2px;
+    line-height: 1.3;
+    min-height: 13px;
+  }
+
+  .input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+    min-width: 0;
+  }
+  .input-group label {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .input-group input,
+  .input-group select {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    padding: 8px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    transition: border-color 0.15s;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+  }
+  .input-group select {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%238a8d80' d='M6 8L0 0h12z'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 28px;
+    cursor: pointer;
+  }
+  .input-group input:focus,
+  .input-group select:focus {
+    outline: none;
+    border-color: var(--amber);
+  }
+  .input-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .analyze-btn {
+    width: 100%;
+    background: var(--amber);
+    color: var(--bg);
+    border: none;
+    padding: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-top: 4px;
+  }
+  .analyze-btn:hover:not(:disabled) {
+    background: var(--amber-bright);
+    box-shadow: 0 0 20px rgba(212,160,74,0.3);
+  }
+  .analyze-btn:disabled {
+    background: var(--line);
+    color: var(--ink-faint);
+    cursor: not-allowed;
+  }
+
+  /* ─── REPORT ──────────────────────────────────────────── */
+  .verdict {
+    padding: 16px;
+    border: 1px solid var(--line);
+    margin-bottom: 14px;
+    background: var(--bg);
+  }
+  .verdict-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .verdict-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+  }
+  .verdict-dot.go { background: var(--signal); box-shadow: 0 0 12px var(--signal); }
+  .verdict-dot.maybe { background: var(--amber); box-shadow: 0 0 12px var(--amber); }
+  .verdict-dot.no { background: var(--danger); box-shadow: 0 0 12px var(--danger); }
+  .verdict-label {
+    font-family: 'Fraunces', serif;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .verdict-detail {
+    font-size: 11px;
+    color: var(--ink-dim);
+    line-height: 1.5;
+  }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .stat {
+    padding: 10px 12px;
+    background: var(--bg);
+  }
+  .stat-label {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin-bottom: 4px;
+  }
+  .stat-value {
+    font-family: 'Fraunces', serif;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-value .unit {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--ink-dim);
+    font-weight: 400;
+    margin-left: 3px;
+  }
+
+  /* ─── PROFILE PANE ────────────────────────────────────── */
+  .profile-header {
+    height: 36px;
+    border-bottom: 1px solid var(--line);
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--panel);
+  }
+  .profile-title {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .profile-title b { color: var(--amber); font-weight: 500; }
+  .profile-legend {
+    display: flex;
+    gap: 18px;
+    font-size: 10px;
+    color: var(--ink-dim);
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 14px; height: 2px; }
+  .legend-swatch.terrain { background: var(--plot-terrain); height: 8px; }
+  .legend-swatch.los { background: var(--amber); }
+  .legend-swatch.fresnel { background: var(--signal); opacity: 0.6; }
+  .legend-swatch.curve { background: var(--ink-dim); border-top: 1px dashed var(--ink-dim); }
+
+  .chart-wrap {
+    height: calc(100% - 36px);
+    padding: 12px 20px 16px;
+    position: relative;
+  }
+  #chart-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-faint);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    gap: 12px;
+  }
+
+  /* ─── ERROR BANNER ───────────────────────────────────── */
+  /* Floats over everything at the top of the viewport. Used for library
+   * load failures, in-app browser detection, and runtime errors that would
+   * otherwise be invisible (cross-origin "Script error"). */
+  #error-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 10000;
+    background: var(--danger);
+    color: #fff;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    padding: 10px 16px;
+    border-bottom: 2px solid #8a3a2a;
+    line-height: 1.5;
+  }
+  #error-banner[hidden] { display: none; }
+  .error-banner-tag { letter-spacing: 0.1em; }
+  .error-banner-close {
+    float: right;
+    background: transparent;
+    border: 1px solid #fff;
+    color: #fff;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+  }
+
+  /* ─── LOADER ─────────────────────────────────────────── */
+  .loader-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(13,16,15,0.85);
+    backdrop-filter: blur(4px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .loader-overlay.active { display: flex; }
+  .loader-bar {
+    width: 200px; height: 2px;
+    background: var(--line);
+    position: relative;
+    overflow: hidden;
+  }
+  .loader-bar::after {
+    content: '';
+    position: absolute;
+    height: 100%; width: 40%;
+    background: var(--amber);
+    animation: scan 1.2s ease-in-out infinite;
+  }
+  @keyframes scan {
+    0% { left: -40%; }
+    100% { left: 100%; }
+  }
+  .loader-text {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--amber);
+  }
+
+  /* ─── SCROLLBAR ───────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--line); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--amber); }
+
+  /* ─── RESPONSIVE ──────────────────────────────────────── */
+  @media (max-width: 900px) {
+    html, body { overflow-y: auto; }
+    .layout {
+      display: block;
+      height: auto;
+      min-height: calc(100vh - 56px);
+    }
+    .pane-map { height: 50vh; min-height: 320px; }
+    .pane-side { height: auto; max-height: none; overflow-y: visible; }
+    .pane-profile { height: 320px; }
+    .topbar-meta { display: none; }
+    .topbar { height: 48px; padding: 0 14px; }
+    .brand-mark { font-size: 18px; }
+    .brand-sub { display: none; }
+    .font-controls { margin-left: auto; }
+    .font-btn { width: 30px; height: 26px; font-size: 10px; }
+    .map-overlay { max-width: 220px; padding: 8px 12px; }
+    .map-overlay-text { font-size: 10px; }
+    .profile-legend { gap: 10px; font-size: 9px; }
+    .chart-wrap { padding: 10px 14px 14px; }
+    /* On mobile, expanded mode makes the map fill the visible viewport.
+     * Use dvh (dynamic viewport height) which accounts for the browser's
+     * URL bar appearing/disappearing — vh on mobile is based on the largest
+     * possible viewport and leaves content under the URL bar / nav bar.
+     * Fallback to vh for older browsers. */
+    .layout.map-expanded .pane-map {
+      height: calc(100vh - 56px);
+      height: calc(100dvh - 48px);
+      min-height: calc(100vh - 56px);
+      min-height: calc(100dvh - 48px);
+    }
+    /* In expanded mode on mobile, lift bottom-corner controls higher
+     * so they stay visible above any browser UI / safe areas.
+     * env(safe-area-inset-bottom) handles iOS home indicator. */
+    .layout.map-expanded .map-corner {
+      bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    }
+    .layout.map-expanded .map-btn-icon {
+      bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    }
+  }
+</style>
+</head>
+<body>
+
+<div id="error-banner" hidden>
+  <b class="error-banner-tag">ERROR</b>
+  <span id="error-banner-text"></span>
+  <button class="error-banner-close" aria-label="Dismiss error">×</button>
+</div>
+
+<script>
+// Early error handling. Set up BEFORE Leaflet/Chart.js initialize so we can
+// catch their failures too. Mobile browsers often display only "Script error"
+// in the console for cross-origin script failures, which is undebuggable —
+// this surfaces actual error details in a visible banner instead.
+function showError(msg) {
+  const b = document.getElementById('error-banner');
+  const t = document.getElementById('error-banner-text');
+  if (b && t) {
+    t.textContent = ' · ' + msg;
+    b.hidden = false;
+  }
+}
+
+document.getElementById('error-banner').querySelector('.error-banner-close')
+  .addEventListener('click', () => {
+    document.getElementById('error-banner').hidden = true;
+  });
+
+window.addEventListener('error', (e) => {
+  const where = e.filename ? ` (${e.filename.split('/').pop()}:${e.lineno})` : '';
+  showError((e.message || 'Script error') + where);
+});
+
+window.addEventListener('unhandledrejection', (e) => {
+  const msg = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+  showError('Promise rejection: ' + msg);
+});
+
+// After page load, verify external libraries arrived. If not, the rest of the
+// app cannot function — surface a clear message instead of letting the user
+// stare at a broken page.
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    const missing = [];
+    if (typeof L === 'undefined') missing.push('Leaflet');
+    if (typeof Chart === 'undefined') missing.push('Chart.js');
+    if (missing.length) {
+      showError(`Failed to load: ${missing.join(', ')}. Check internet connection or try reloading.`);
+    }
+  }, 1500);
+
+  // In-app browsers (Facebook, Instagram, etc.) aggressively block third-party
+  // API calls, which breaks both map tiles and elevation lookups. Detect and
+  // warn early so the user knows to switch to a real browser.
+  const inAppBrowsers = /FBAN|FBAV|Instagram|Line\/|MicroMessenger|Twitter|WhatsApp|TikTok/i;
+  if (inAppBrowsers.test(navigator.userAgent)) {
+    showError("You're in an in-app browser. Map tiles and elevation data are usually blocked here. Tap the ⋯ menu and choose 'Open in Safari' or 'Open in Browser' for the app to work.");
+  }
+});
+</script>
+
+<div class="topbar">
+  <div class="brand">
+    <div class="brand-mark">TERRAIN<span class="slash">/</span>LINK</div>
+    <div class="brand-sub">Radio Path Profile Analyzer · v1.0</div>
+  </div>
+  <div class="topbar-meta">
+    <span>DATUM <b>WGS84</b></span>
+    <span>DEM <b>SRTM</b></span>
+    <span>SAMPLES <b id="meta-samples">—</b></span>
+  </div>
+  <div class="font-controls" role="group" aria-label="Adjust text size">
+    <button class="font-btn" id="btn-font-down" title="Decrease text size" aria-label="Decrease text size">A−</button>
+    <button class="font-btn" id="btn-font-up" title="Increase text size" aria-label="Increase text size">A+</button>
+  </div>
+</div>
+
+<div class="layout">
+
+  <!-- MAP PANE -->
+  <div class="pane-map">
+    <div id="map"></div>
+    <div class="map-overlay">
+      <div class="map-overlay-title">Survey Mode</div>
+      <div class="map-overlay-text">
+        Click the map to set <b style="color:var(--amber)">Point A</b>, click again to set <b style="color:var(--signal)">Point B</b>. Drag either pin to refine.
+      </div>
+    </div>
+    <div class="map-corner">
+      <button class="map-btn" id="btn-locate">Locate Me</button>
+      <button class="map-btn" id="btn-sample">Use Example</button>
+      <button class="map-btn danger" id="btn-clear">Clear</button>
+    </div>
+    <button class="map-btn-icon" id="btn-expand" title="Expand map (Esc to exit)" aria-label="Expand map">
+      <!-- Diagonal arrows icon — switches to inward arrows when expanded -->
+      <svg id="btn-expand-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="15 3 21 3 21 9"></polyline>
+        <polyline points="9 21 3 21 3 15"></polyline>
+        <line x1="21" y1="3" x2="14" y2="10"></line>
+        <line x1="3" y1="21" x2="10" y2="14"></line>
+      </svg>
+    </button>
+  </div>
+
+  <!-- SIDE PANEL -->
+  <div class="pane-side">
+
+    <div class="side-section">
+      <div class="side-heading">Endpoints</div>
+
+      <div class="endpoint-row">
+        <div class="endpoint-marker a"></div>
+        <div class="endpoint-data">
+          <div class="label">Point A — Transmitter</div>
+          <div class="val empty" id="point-a">Click map to set</div>
+          <div class="place" id="place-a"></div>
+        </div>
+      </div>
+
+      <div class="endpoint-row">
+        <div class="endpoint-marker b"></div>
+        <div class="endpoint-data">
+          <div class="label">Point B — Receiver</div>
+          <div class="val empty" id="point-b">Click map to set</div>
+          <div class="place" id="place-b"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="side-section">
+      <div class="side-heading">Link Parameters</div>
+
+      <div class="input-row">
+        <div class="input-group">
+          <label>TX Antenna Height (m)</label>
+          <input type="number" id="height-a" value="10" min="0" step="1" />
+        </div>
+        <div class="input-group">
+          <label>RX Antenna Height (m)</label>
+          <input type="number" id="height-b" value="10" min="0" step="1" />
+        </div>
+      </div>
+
+      <div class="input-row">
+        <div class="input-group">
+          <label>Frequency (MHz)</label>
+          <input type="number" id="frequency" value="144" min="1" step="1" />
+        </div>
+        <div class="input-group">
+          <label>Environment</label>
+          <select id="environment">
+            <option value="open">Open</option>
+            <option value="suburban">Suburban</option>
+            <option value="forested" selected>Forested</option>
+            <option value="urban">Urban</option>
+          </select>
+        </div>
+      </div>
+
+      <button class="analyze-btn" id="btn-analyze" disabled>Run Path Analysis</button>
+    </div>
+
+    <div class="side-section" id="report-section" style="display:none">
+      <div class="side-heading">Path Analysis</div>
+
+      <div class="verdict">
+        <div class="verdict-status">
+          <div class="verdict-dot" id="verdict-dot"></div>
+          <div class="verdict-label" id="verdict-label">—</div>
+        </div>
+        <div class="verdict-detail" id="verdict-detail"></div>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat">
+          <div class="stat-label">Distance</div>
+          <div class="stat-value" id="stat-distance">— <span class="unit">km</span></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Bearing</div>
+          <div class="stat-value" id="stat-bearing">— <span class="unit">°</span></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Δ Elevation</div>
+          <div class="stat-value" id="stat-delta">— <span class="unit">m</span></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Max Obstacle</div>
+          <div class="stat-value" id="stat-obstacle">— <span class="unit">m</span></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Fresnel R₁</div>
+          <div class="stat-value" id="stat-fresnel">— <span class="unit">m</span></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Diffraction Loss</div>
+          <div class="stat-value" id="stat-diffraction">— <span class="unit">dB</span></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Clutter Loss</div>
+          <div class="stat-value" id="stat-clutter">— <span class="unit">dB</span></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Free Space Loss</div>
+          <div class="stat-value" id="stat-fspl">— <span class="unit">dB</span></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">End-to-End Loss</div>
+          <div class="stat-value" id="stat-total">— <span class="unit">dB</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- PROFILE PANE -->
+  <div class="pane-profile">
+    <div class="profile-header">
+      <div class="profile-title">Cross-Section · <b>A → B</b></div>
+      <div class="profile-legend">
+        <div class="legend-item"><div class="legend-swatch terrain"></div>Terrain</div>
+        <div class="legend-item"><div class="legend-swatch los"></div>Line of Sight</div>
+        <div class="legend-item"><div class="legend-swatch fresnel"></div>Fresnel Zone</div>
+        <div class="legend-item"><div class="legend-swatch curve"></div>Earth Curve</div>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <div id="chart-empty">
+        <div>Awaiting survey points</div>
+      </div>
+      <canvas id="profile-chart" style="display:none"></canvas>
+    </div>
+    <div class="loader-overlay" id="loader">
+      <div class="loader-bar"></div>
+      <div class="loader-text">Sampling Terrain Data…</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ─── STATE ──────────────────────────────────────────────
+const state = {
+  pointA: null,
+  pointB: null,
+  markerA: null,
+  markerB: null,
+  pathLine: null,
+  chart: null,
+  hoverMarker: null,       // marker that follows the chart cursor
+  obstacleMarkers: [],     // markers on Deygout obstacle locations
+};
+
+// ─── MAP SETUP ──────────────────────────────────────────
+const map = L.map('map', {
+  zoomControl: true,
+  attributionControl: true,
+}).setView([46.5197, 6.6323], 9); // Default: Lausanne — will be overridden by IP location guess below
+
+// Tile layers. Esri's free tile services are used for both — no API key
+// required, no Referer header required (works from file:// URLs), reliable
+// globally. We offer two views:
+//   - Topo: contour-style shading, ideal for path planning over terrain
+//   - Satellite: aerial imagery, useful to see whether obstacles are forest,
+//     buildings, water, or bare ground
+const topoLayer = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+  {
+    maxZoom: 19,
+    attribution: 'Tiles © Esri — Esri, DeLorme, NAVTEQ, TomTom, USGS, NGA',
+    crossOrigin: true,
+  }
+);
+const satelliteLayer = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  {
+    maxZoom: 19,
+    attribution: 'Tiles © Esri — Earthstar Geographics, Maxar, USGS, USDA',
+    crossOrigin: true,
+  }
+);
+// Place labels overlay for use with satellite imagery — without it, satellite
+// view is hard to navigate (no city/road names). Esri's reference layer is
+// transparent and works well as an overlay.
+const labelsLayer = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+  {
+    maxZoom: 19,
+    attribution: '',
+    crossOrigin: true,
+    pane: 'overlayPane',
+  }
+);
+
+topoLayer.on('tileerror', (e) => console.warn('Topo tile error', e));
+satelliteLayer.on('tileerror', (e) => console.warn('Satellite tile error', e));
+
+// Default to topo view
+topoLayer.addTo(map);
+
+// Leaflet's built-in layer control — small box top-right with a radio selector
+const baseLayers = {
+  'Topographic': topoLayer,
+  'Satellite': satelliteLayer,
+};
+const overlays = {
+  'Place Labels': labelsLayer,
+};
+L.control.layers(baseLayers, overlays, { position: 'topright', collapsed: true }).addTo(map);
+
+// ─── INITIAL LOCATION GUESS ─────────────────────────────
+// Try to put the map roughly where the user is on first load, using their IP
+// address. This is country/city-level accurate (not GPS-level) and requires
+// no permission. If it fails, we silently keep the default view.
+//
+// We try multiple free IP geolocation services in order — individual services
+// rate-limit, change auth requirements, or go down without notice, so falling
+// back is much more reliable than depending on one.
+//
+// We only re-center if the user hasn't started interacting with the map yet.
+// If their connection is slow and the response arrives after they've panned
+// or dropped a point, we leave their view alone.
+let userHasInteracted = false;
+map.on('mousedown touchstart dragstart', () => { userHasInteracted = true; });
+
+// IP geolocation providers tried in order. All are free, HTTPS, no API key,
+// CORS-enabled. We try several because individual services occasionally rate
+// limit, return 403, or go down. Each one has a slightly different response
+// shape, so the extractor function pulls lat/lng in the right way.
+const IP_LOCATION_PROVIDERS = [
+  {
+    name: 'ipapi.co',
+    url: 'https://ipapi.co/json/',
+    extract: (d) => ({ lat: d.latitude, lng: d.longitude, city: d.city, country: d.country_name }),
+  },
+  {
+    name: 'geojs.io',
+    url: 'https://get.geojs.io/v1/ip/geo.json',
+    extract: (d) => ({ lat: parseFloat(d.latitude), lng: parseFloat(d.longitude), city: d.city, country: d.country }),
+  },
+  {
+    name: 'ipwho.is',
+    url: 'https://ipwho.is/',
+    extract: (d) => (d.success !== false ? { lat: d.latitude, lng: d.longitude, city: d.city, country: d.country } : null),
+  },
+];
+
+async function tryIpLocation(provider) {
+  const r = await fetch(provider.url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const d = await r.json();
+  const loc = provider.extract(d);
+  if (!loc || typeof loc.lat !== 'number' || typeof loc.lng !== 'number' || isNaN(loc.lat) || isNaN(loc.lng)) {
+    throw new Error('No valid coordinates in response');
+  }
+  return loc;
+}
+
+(async function guessInitialLocation() {
+  for (const provider of IP_LOCATION_PROVIDERS) {
+    try {
+      console.log(`[IP location] Trying ${provider.name}...`);
+      const loc = await tryIpLocation(provider);
+      if (userHasInteracted) {
+        console.log('[IP location] User already interacted with map, ignoring result');
+        return;
+      }
+      console.log(`[IP location] ${provider.name}: ${loc.city || '?'}, ${loc.country || '?'} (${loc.lat}, ${loc.lng})`);
+      map.setView([loc.lat, loc.lng], 9);
+      return;
+    } catch (e) {
+      console.warn(`[IP location] ${provider.name} failed:`, e.message);
+    }
+  }
+  console.warn('[IP location] All providers failed, keeping default view');
+})();
+
+// ─── REVERSE GEOCODING ──────────────────────────────────
+// Look up a place name for a coordinate via Nominatim (OpenStreetMap). Free,
+// no API key, but they ask for low request rates (~1/sec max). Their usage
+// policy also requires a descriptive User-Agent, but browsers won't let JS
+// set that header — using a custom Referer/Origin is the realistic equivalent.
+// Results are debounced (no rapid-fire requests when dragging a marker) and
+// cached in-memory to avoid re-querying the same point.
+const reverseGeocodeCache = new Map();
+let reverseGeocodeTimers = { A: null, B: null };
+
+async function reverseGeocode(latlng) {
+  const key = `${latlng.lat.toFixed(4)},${latlng.lng.toFixed(4)}`;
+  if (reverseGeocodeCache.has(key)) return reverseGeocodeCache.get(key);
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latlng.lat}&lon=${latlng.lng}&zoom=14&addressdetails=1`;
+    const r = await fetchWithTimeout(url, {}, 5000);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    // Build a short, useful label. Prefer "Neighborhood, City" or "Village, Region".
+    const a = d.address || {};
+    const primary = a.neighbourhood || a.suburb || a.village || a.hamlet || a.town || a.city || a.municipality || a.county || '';
+    const secondary = a.city || a.town || a.municipality || a.county || a.state || a.country || '';
+    let label;
+    if (primary && secondary && primary !== secondary) {
+      label = `${primary}, ${secondary}`;
+    } else {
+      label = primary || secondary || d.display_name || '';
+    }
+    // Trim very long labels
+    if (label.length > 60) label = label.slice(0, 57) + '…';
+    reverseGeocodeCache.set(key, label);
+    return label;
+  } catch (e) {
+    console.warn('Reverse geocode failed:', e.message);
+    return '';
+  }
+}
+
+function scheduleReverseGeocode(which, latlng) {
+  // Debounce — wait 600ms after the last update before firing the request.
+  // Prevents a burst of lookups while a marker is being dragged.
+  if (reverseGeocodeTimers[which]) clearTimeout(reverseGeocodeTimers[which]);
+  const el = document.getElementById('place-' + which.toLowerCase());
+  if (el) el.textContent = '…';
+  reverseGeocodeTimers[which] = setTimeout(async () => {
+    const label = await reverseGeocode(latlng);
+    // Make sure the point hasn't moved or been cleared during the lookup
+    const current = which === 'A' ? state.pointA : state.pointB;
+    if (!current || Math.abs(current.lat - latlng.lat) > 0.0001 || Math.abs(current.lng - latlng.lng) > 0.0001) return;
+    if (el) el.textContent = label;
+  }, 600);
+}
+
+// ─── PERMALINK ──────────────────────────────────────────
+// Encode the current path state in the URL hash so it can be bookmarked and
+// shared. Format: #a=lat,lng&b=lat,lng&freq=X&hA=Y&hB=Z
+function encodeStateToHash() {
+  const parts = [];
+  if (state.pointA) parts.push(`a=${state.pointA.lat.toFixed(5)},${state.pointA.lng.toFixed(5)}`);
+  if (state.pointB) parts.push(`b=${state.pointB.lat.toFixed(5)},${state.pointB.lng.toFixed(5)}`);
+  const f = document.getElementById('frequency').value;
+  const ha = document.getElementById('height-a').value;
+  const hb = document.getElementById('height-b').value;
+  const env = document.getElementById('environment').value;
+  if (f) parts.push(`freq=${f}`);
+  if (ha) parts.push(`hA=${ha}`);
+  if (hb) parts.push(`hB=${hb}`);
+  if (env) parts.push(`env=${env}`);
+  const newHash = '#' + parts.join('&');
+  // Use replaceState to avoid littering browser history with every drag
+  history.replaceState(null, '', location.pathname + location.search + newHash);
+}
+
+function parseLatLngPair(s) {
+  if (!s) return null;
+  const m = s.split(',');
+  if (m.length !== 2) return null;
+  const lat = parseFloat(m[0]);
+  const lng = parseFloat(m[1]);
+  if (isNaN(lat) || isNaN(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return L.latLng(lat, lng);
+}
+
+function decodeStateFromHash() {
+  if (!location.hash || location.hash.length < 2) return false;
+  const params = new URLSearchParams(location.hash.slice(1));
+  const a = parseLatLngPair(params.get('a'));
+  const b = parseLatLngPair(params.get('b'));
+  const f = params.get('freq');
+  const ha = params.get('hA');
+  const hb = params.get('hB');
+  const env = params.get('env');
+  if (f) document.getElementById('frequency').value = f;
+  if (ha) document.getElementById('height-a').value = ha;
+  if (hb) document.getElementById('height-b').value = hb;
+  if (env && ENVIRONMENTS[env]) document.getElementById('environment').value = env;
+  if (a) setPointA(a);
+  if (b) setPointB(b);
+  if (a && b) {
+    map.fitBounds([a, b], { padding: [60, 60] });
+    return true;
+  }
+  return !!a;
+}
+
+// ─── ELEVATION CACHE ────────────────────────────────────
+// Cache elevation lookups in localStorage so re-analyzing the same path is
+// instant and doesn't hit the public APIs again. Coordinates are rounded to
+// 4 decimals (~10m) which is finer than the underlying SRTM data resolution.
+const ELEV_CACHE_PREFIX = 'tp-elev:';
+const ELEV_CACHE_MAX = 5000; // cap entries to avoid unbounded growth
+
+function elevCacheKey(latlng) {
+  return `${ELEV_CACHE_PREFIX}${latlng.lat.toFixed(4)},${latlng.lng.toFixed(4)}`;
+}
+
+function getCachedElevation(latlng) {
+  try {
+    const v = localStorage.getItem(elevCacheKey(latlng));
+    return v === null ? null : parseFloat(v);
+  } catch (e) { return null; }
+}
+
+function setCachedElevation(latlng, elev) {
+  try {
+    localStorage.setItem(elevCacheKey(latlng), String(elev));
+  } catch (e) {
+    // localStorage full — prune oldest half of our entries and retry once
+    pruneElevationCache();
+    try { localStorage.setItem(elevCacheKey(latlng), String(elev)); } catch {}
+  }
+}
+
+function pruneElevationCache() {
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(ELEV_CACHE_PREFIX)) keys.push(k);
+    }
+    if (keys.length > ELEV_CACHE_MAX / 2) {
+      // No timestamps stored, so just drop a chunk arbitrarily.
+      keys.slice(0, Math.floor(keys.length / 2)).forEach(k => localStorage.removeItem(k));
+    }
+  } catch (e) {}
+}
+
+function makeIcon(letter, variant) {
+  return L.divIcon({
+    className: '',
+    html: `<div class="marker-pin ${variant}">${letter}</div>`,
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
+  });
+}
+
+map.on('click', (e) => {
+  if (!state.pointA) {
+    setPointA(e.latlng);
+  } else if (!state.pointB) {
+    setPointB(e.latlng);
+  } else {
+    // Reset and start fresh
+    clearAll();
+    setPointA(e.latlng);
+  }
+});
+
+function setPointA(latlng) {
+  state.pointA = latlng;
+  state.markerA = L.marker(latlng, {
+    icon: makeIcon('A', 'a'),
+    draggable: true,
+  }).addTo(map);
+  state.markerA.on('dragend', (e) => {
+    state.pointA = e.target.getLatLng();
+    updatePointDisplays();
+    updatePathLine();
+    scheduleReverseGeocode('A', state.pointA);
+    encodeStateToHash();
+  });
+  updatePointDisplays();
+  updatePathLine();
+  scheduleReverseGeocode('A', latlng);
+  encodeStateToHash();
+}
+
+function setPointB(latlng) {
+  state.pointB = latlng;
+  state.markerB = L.marker(latlng, {
+    icon: makeIcon('B', 'b'),
+    draggable: true,
+  }).addTo(map);
+  state.markerB.on('dragend', (e) => {
+    state.pointB = e.target.getLatLng();
+    updatePointDisplays();
+    updatePathLine();
+    scheduleReverseGeocode('B', state.pointB);
+    encodeStateToHash();
+  });
+  updatePointDisplays();
+  updatePathLine();
+  scheduleReverseGeocode('B', latlng);
+  encodeStateToHash();
+}
+
+function updatePathLine() {
+  if (state.pathLine) {
+    map.removeLayer(state.pathLine);
+    state.pathLine = null;
+  }
+  if (state.pointA && state.pointB) {
+    state.pathLine = L.polyline([state.pointA, state.pointB], {
+      color: '#d4a04a',
+      weight: 2,
+      opacity: 0.8,
+      dashArray: '6, 4',
+    }).addTo(map);
+  }
+}
+
+function updatePointDisplays() {
+  const elA = document.getElementById('point-a');
+  const elB = document.getElementById('point-b');
+  if (state.pointA) {
+    elA.textContent = `${state.pointA.lat.toFixed(5)}°, ${state.pointA.lng.toFixed(5)}°`;
+    elA.classList.remove('empty');
+  } else {
+    elA.textContent = 'Click map to set';
+    elA.classList.add('empty');
+  }
+  if (state.pointB) {
+    elB.textContent = `${state.pointB.lat.toFixed(5)}°, ${state.pointB.lng.toFixed(5)}°`;
+    elB.classList.remove('empty');
+  } else {
+    elB.textContent = 'Click map to set';
+    elB.classList.add('empty');
+  }
+  document.getElementById('btn-analyze').disabled = !(state.pointA && state.pointB);
+}
+
+function clearAll() {
+  if (state.markerA) { map.removeLayer(state.markerA); state.markerA = null; }
+  if (state.markerB) { map.removeLayer(state.markerB); state.markerB = null; }
+  if (state.pathLine) { map.removeLayer(state.pathLine); state.pathLine = null; }
+  state.pointA = null;
+  state.pointB = null;
+  document.getElementById('place-a').textContent = '';
+  document.getElementById('place-b').textContent = '';
+  updatePointDisplays();
+  document.getElementById('report-section').style.display = 'none';
+  document.getElementById('chart-empty').style.display = 'flex';
+  document.getElementById('profile-chart').style.display = 'none';
+  if (state.chart) { state.chart.destroy(); state.chart = null; }
+  document.getElementById('meta-samples').textContent = '—';
+  // Clear chart-hover marker and worst-obstacle marker
+  if (state.hoverMarker) { map.removeLayer(state.hoverMarker); state.hoverMarker = null; }
+  if (state.obstacleMarkers && state.obstacleMarkers.length) {
+    state.obstacleMarkers.forEach(m => map.removeLayer(m));
+    state.obstacleMarkers = [];
+  }
+  // Reset URL hash
+  history.replaceState(null, '', location.pathname + location.search);
+}
+
+document.getElementById('btn-clear').addEventListener('click', clearAll);
+
+// Example: a path across mountainous Switzerland terrain
+document.getElementById('btn-sample').addEventListener('click', () => {
+  clearAll();
+  setPointA(L.latLng(46.5547, 7.9831));   // Interlaken area
+  setPointB(L.latLng(46.6210, 8.0411));   // Across mountains
+  map.fitBounds([state.pointA, state.pointB], { padding: [60, 60] });
+});
+
+// Expand / collapse map. Toggles the .map-expanded class on the layout which
+// hides the side panel and profile via CSS. Then we tell Leaflet to recompute
+// its size so tiles fill the new dimensions.
+const btnExpand = document.getElementById('btn-expand');
+const btnExpandSvg = document.getElementById('btn-expand-svg');
+const layoutEl = document.querySelector('.layout');
+
+// SVG paths for the two states. Expand = arrows pointing outward to corners.
+// Collapse = arrows pointing inward (from corners to center).
+const ICON_EXPAND = `
+  <polyline points="15 3 21 3 21 9"></polyline>
+  <polyline points="9 21 3 21 3 15"></polyline>
+  <line x1="21" y1="3" x2="14" y2="10"></line>
+  <line x1="3" y1="21" x2="10" y2="14"></line>`;
+const ICON_COLLAPSE = `
+  <polyline points="4 14 10 14 10 20"></polyline>
+  <polyline points="20 10 14 10 14 4"></polyline>
+  <line x1="14" y1="10" x2="21" y2="3"></line>
+  <line x1="3" y1="21" x2="10" y2="14"></line>`;
+
+function setExpandIcon(expanded) {
+  btnExpandSvg.innerHTML = expanded ? ICON_COLLAPSE : ICON_EXPAND;
+  btnExpand.title = expanded ? 'Collapse map (Esc)' : 'Expand map';
+  btnExpand.setAttribute('aria-label', expanded ? 'Collapse map' : 'Expand map');
+}
+
+btnExpand.addEventListener('click', () => {
+  const expanded = layoutEl.classList.toggle('map-expanded');
+  setExpandIcon(expanded);
+  // Wait for layout reflow, then a second time for slower mobile browsers
+  setTimeout(() => map.invalidateSize(), 50);
+  setTimeout(() => map.invalidateSize(), 300);
+});
+
+// On mobile, the visible viewport changes as the URL bar shows/hides.
+// When expanded, recompute map size on window resize so the map and the
+// bottom controls stay in their right places.
+window.addEventListener('resize', () => {
+  if (layoutEl.classList.contains('map-expanded')) {
+    map.invalidateSize();
+  }
+});
+
+// Also allow Esc to exit expanded mode — natural escape gesture
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && layoutEl.classList.contains('map-expanded')) {
+    layoutEl.classList.remove('map-expanded');
+    setExpandIcon(false);
+    setTimeout(() => map.invalidateSize(), 50);
+  }
+});
+
+// ─── GEOLOCATION ────────────────────────────────────────
+// Use the browser's Geolocation API to center the map on the user. This is a
+// permissioned API — the browser will prompt the user on the first call.
+// Note: it works over https:// and file:// but NOT plain http:// (browser
+// security policy). On file:// some browsers may still refuse.
+const btnLocate = document.getElementById('btn-locate');
+let locationMarker = null;
+
+btnLocate.addEventListener('click', () => {
+  if (!navigator.geolocation) {
+    showError('Geolocation is not supported by this browser.');
+    return;
+  }
+  btnLocate.textContent = 'Locating…';
+  btnLocate.disabled = true;
+
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const latlng = L.latLng(pos.coords.latitude, pos.coords.longitude);
+      const accuracy = pos.coords.accuracy; // meters
+
+      // Choose zoom level based on accuracy: tight zoom for GPS-quality fixes,
+      // wider zoom when we only have IP-level accuracy (many kilometers)
+      let zoom = 14;
+      if (accuracy > 10000) zoom = 10;
+      else if (accuracy > 1000) zoom = 12;
+      else if (accuracy < 50) zoom = 15;
+
+      map.setView(latlng, zoom);
+
+      // Drop a small "you are here" marker with accuracy circle
+      if (locationMarker) {
+        map.removeLayer(locationMarker.dot);
+        map.removeLayer(locationMarker.ring);
+      }
+      const dot = L.circleMarker(latlng, {
+        radius: 6,
+        color: '#6fae6f',
+        fillColor: '#6fae6f',
+        fillOpacity: 1,
+        weight: 2,
+      }).addTo(map);
+      const ring = L.circle(latlng, {
+        radius: accuracy,
+        color: '#6fae6f',
+        fillColor: '#6fae6f',
+        fillOpacity: 0.08,
+        weight: 1,
+      }).addTo(map);
+      locationMarker = { dot, ring };
+
+      btnLocate.textContent = 'Locate Me';
+      btnLocate.disabled = false;
+    },
+    (err) => {
+      let msg = 'Could not get location: ';
+      switch (err.code) {
+        case err.PERMISSION_DENIED:
+          msg += 'permission denied. Allow location access in browser settings.';
+          break;
+        case err.POSITION_UNAVAILABLE:
+          msg += 'position unavailable. GPS may be disabled or out of range.';
+          break;
+        case err.TIMEOUT:
+          msg += 'request timed out. Try again outdoors or near a window.';
+          break;
+        default:
+          msg += err.message || 'unknown error.';
+      }
+      showError(msg);
+      btnLocate.textContent = 'Locate Me';
+      btnLocate.disabled = false;
+    },
+    {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 60000, // accept cached position up to 1 minute old
+    }
+  );
+});
+
+// ─── GEO MATH ───────────────────────────────────────────
+const EARTH_R = 6371008.8; // meters, mean Earth radius
+const EARTH_R_EFFECTIVE = EARTH_R * 4/3; // 4/3 Earth model for radio (atm refraction)
+
+function haversineDistance(a, b) {
+  const toRad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * toRad;
+  const dLng = (b.lng - a.lng) * toRad;
+  const lat1 = a.lat * toRad;
+  const lat2 = b.lat * toRad;
+  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+  return 2 * EARTH_R * Math.asin(Math.sqrt(h));
+}
+
+function bearing(a, b) {
+  const toRad = Math.PI / 180;
+  const lat1 = a.lat * toRad;
+  const lat2 = b.lat * toRad;
+  const dLng = (b.lng - a.lng) * toRad;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLng);
+  const brg = Math.atan2(y, x) * 180 / Math.PI;
+  return (brg + 360) % 360;
+}
+
+function interpolate(a, b, t) {
+  // Linear interpolation in lat/lng — fine for short distances (< 200km)
+  return {
+    lat: a.lat + (b.lat - a.lat) * t,
+    lng: a.lng + (b.lng - a.lng) * t,
+  };
+}
+
+// ─── ELEVATION API ──────────────────────────────────────
+// We try multiple free elevation services. They share three failure modes:
+//   1. Rate limiting (HTTP 429) — solved by retry with backoff
+//   2. Server timeout (HTTP 504, especially Open-Elevation on long paths)
+//      — solved by smaller chunks + client-side timeout
+//   3. Service down — solved by falling back to next provider
+
+// Fetch with a hard client-side timeout. Without this, a hung request can
+// stall the whole analysis for minutes before the browser's default timeout.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Run with retry on 429 (rate limited). Exponential backoff: 500ms, 1s, 2s.
+async function withRetry(fn, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      // Retry on rate limit or transient server errors. Don't retry on 4xx
+      // permanent errors (auth, bad request, etc).
+      const transient = /429|5\d\d|timeout|abort/i.test(e.message);
+      if (!transient || i === attempts - 1) throw e;
+      await new Promise(r => setTimeout(r, 500 * Math.pow(2, i)));
+    }
+  }
+  throw lastErr;
+}
+
+async function getElevationsOpenMeteo(points) {
+  // Open-Meteo: GET with comma-separated coords. Smaller chunks (50) leave
+  // more headroom under their free-tier rate limit and reduce 429s.
+  const CHUNK = 50;
+  const results = [];
+  for (let i = 0; i < points.length; i += CHUNK) {
+    const chunk = points.slice(i, i + CHUNK);
+    const lats = chunk.map(p => p.lat.toFixed(6)).join(',');
+    const lngs = chunk.map(p => p.lng.toFixed(6)).join(',');
+    const url = `https://api.open-meteo.com/v1/elevation?latitude=${lats}&longitude=${lngs}`;
+    const r = await withRetry(() => fetchWithTimeout(url, {}, 10000));
+    if (!r.ok) throw new Error(`Open-Meteo HTTP ${r.status}`);
+    const d = await r.json();
+    results.push(...d.elevation);
+  }
+  return results;
+}
+
+async function getElevationsOpenElevation(points) {
+  // Open-Elevation: chunk requests too — a 200-point POST regularly times out
+  // (504) against their public server, but 50-point batches complete reliably.
+  const CHUNK = 50;
+  const results = [];
+  for (let i = 0; i < points.length; i += CHUNK) {
+    const chunk = points.slice(i, i + CHUNK);
+    const locations = chunk.map(p => ({ latitude: p.lat, longitude: p.lng }));
+    const r = await withRetry(() => fetchWithTimeout(
+      'https://api.open-elevation.com/api/v1/lookup',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ locations }),
+      },
+      15000
+    ));
+    if (!r.ok) throw new Error(`Open-Elevation HTTP ${r.status}`);
+    const data = await r.json();
+    results.push(...data.results.map(x => x.elevation));
+  }
+  return results;
+}
+
+async function fetchElevationsWithFallback(points) {
+  // Check the cache for each point. Build a list of just the uncached ones
+  // to request, plus a mapping back to original positions.
+  const cached = new Array(points.length);
+  const missingIdx = [];
+  const missingPoints = [];
+  for (let i = 0; i < points.length; i++) {
+    const v = getCachedElevation(points[i]);
+    if (v !== null) {
+      cached[i] = v;
+    } else {
+      missingIdx.push(i);
+      missingPoints.push(points[i]);
+    }
+  }
+
+  // All cached — no network needed
+  if (missingPoints.length === 0) {
+    console.log(`[elevation] All ${points.length} points cached`);
+    return cached;
+  }
+
+  console.log(`[elevation] ${points.length - missingPoints.length} cached, ${missingPoints.length} to fetch`);
+
+  let fetched;
+  const errors = [];
+  try {
+    fetched = await getElevationsOpenMeteo(missingPoints);
+  } catch (e) {
+    errors.push('Open-Meteo: ' + e.message);
+    console.warn('Open-Meteo failed:', e);
+    try {
+      fetched = await getElevationsOpenElevation(missingPoints);
+    } catch (e2) {
+      errors.push('Open-Elevation: ' + e2.message);
+      console.warn('Open-Elevation failed:', e2);
+      const isInApp = /FBAN|FBAV|Instagram|Line\/|MicroMessenger|Twitter|WhatsApp/i.test(navigator.userAgent);
+      const hint = isInApp
+        ? '\n\nThis looks like an in-app browser (Facebook/Instagram/etc), which often blocks external API calls. Try opening this page in Safari or Chrome directly.'
+        : '\n\nThe free elevation services are rate-limiting or overloaded. Try a shorter path, or wait a minute and try again.';
+      throw new Error('Both elevation services unavailable. ' + errors.join(' | ') + hint);
+    }
+  }
+
+  // Stitch results back together and cache the new values
+  for (let i = 0; i < missingIdx.length; i++) {
+    const elev = fetched[i];
+    cached[missingIdx[i]] = elev;
+    setCachedElevation(missingPoints[i], elev);
+  }
+  return cached;
+}
+
+// ─── RADIO MATH ─────────────────────────────────────────
+// First Fresnel zone radius at distance d1 from TX, d2 from RX
+// r = sqrt(λ * d1 * d2 / (d1 + d2))
+function fresnelRadius(d1, d2, freqMHz) {
+  if (d1 <= 0 || d2 <= 0) return 0;
+  const wavelength = 299792458 / (freqMHz * 1e6); // meters
+  return Math.sqrt(wavelength * d1 * d2 / (d1 + d2));
+}
+
+// Earth bulge between two endpoints at given distance d1 along path of total D
+// h = d1 * d2 / (2 * k * R)   with k=4/3 for radio
+function earthBulge(d1, totalD) {
+  const d2 = totalD - d1;
+  if (d1 <= 0 || d2 <= 0) return 0;
+  return (d1 * d2) / (2 * EARTH_R_EFFECTIVE);
+}
+
+// Free space path loss in dB
+function fspl(distanceM, freqMHz) {
+  const distKm = distanceM / 1000;
+  return 20 * Math.log10(distKm) + 20 * Math.log10(freqMHz) + 32.44;
+}
+
+// Knife-edge diffraction loss (ITU-R P.526 approximation).
+// Returns the loss in dB caused by an obstacle that intrudes h meters into
+// (or near) the direct path. h is the height of the obstacle ABOVE the
+// straight line from TX to RX (positive = obstruction, negative = clearance).
+// d1, d2 are the distances from TX and RX to the obstacle in meters.
+//
+// The Fresnel-Kirchhoff parameter is:
+//   v = h * sqrt(2 * (d1 + d2) / (λ * d1 * d2))
+//
+// Lower frequency = larger λ = smaller v for the same obstacle = less loss.
+// A ridge that gives 25 dB loss at 2.4 GHz might give only 8 dB at 70 MHz.
+function knifeEdgeLoss(h, d1, d2, freqMHz) {
+  if (d1 <= 0 || d2 <= 0) return 0;
+  const wavelength = 299792458 / (freqMHz * 1e6);
+  const v = h * Math.sqrt(2 * (d1 + d2) / (wavelength * d1 * d2));
+
+  // ITU-R P.526 piecewise approximation, accurate to ~1 dB
+  if (v <= -0.78) return 0; // obstacle well below path, no diffraction loss
+  // J(v) = 6.9 + 20 * log10( sqrt((v-0.1)^2 + 1) + v - 0.1 )
+  return 6.9 + 20 * Math.log10(Math.sqrt((v - 0.1) * (v - 0.1) + 1) + v - 0.1);
+}
+
+// Compute Fresnel-Kirchhoff parameter v at a point relative to a given path.
+// Used by the Deygout method to find the highest-v obstacle in a segment.
+function fresnelV(h, d1, d2, freqMHz) {
+  if (d1 <= 0 || d2 <= 0) return -Infinity;
+  const wavelength = 299792458 / (freqMHz * 1e6);
+  return h * Math.sqrt(2 * (d1 + d2) / (wavelength * d1 * d2));
+}
+
+// Deygout (1966) multi-obstacle knife-edge diffraction with ITU-R P.526-15
+// correction to reduce over-counting when secondary obstacles are comparable
+// to the principal one.
+//
+// Vanilla Deygout finds the principal edge (highest obstacle), computes its
+// loss, then recurses on the sub-segments and adds those losses. This is
+// known to overestimate loss when there are 2-3 comparable peaks, because
+// in reality the secondary peaks are largely "in the shadow" of diffraction
+// around the principal — adding their full losses double-counts.
+//
+// The ITU correction reduces sub-edge contributions based on how much
+// smaller they are than the principal (in terms of v). Specifically, sub-
+// edges whose v is much less than the principal's contribute proportionally
+// less to the total. We also cap recursion at depth 2 (principal + one level
+// of sub-edges), since deeper recursion adds little physical accuracy and
+// compounds the over-counting.
+//
+// On the well-known "rolling hills below LOS" test this returns 0. On a
+// single ridge it returns the same as classical knife-edge. On 2-3 ridges
+// near the LOS, it returns 2-8 dB more than single knife-edge — significant
+// but not catastrophic.
+//
+// Returns: { totalLoss, edges: [{ index, lossDb, v }, ...] }.
+function deygoutDiffraction(startIdx, endIdx, terrainHeights, losHeights, distances, freqMHz, depth = 0, parentV = Infinity) {
+  if (depth > 2) return { totalLoss: 0, edges: [] };
+  if (endIdx - startIdx < 2) return { totalLoss: 0, edges: [] };
+
+  const xStart = distances[startIdx];
+  const xEnd = distances[endIdx];
+  const yStart = losHeights[startIdx];
+  const yEnd = losHeights[endIdx];
+  const totalLen = xEnd - xStart;
+  if (totalLen <= 0) return { totalLoss: 0, edges: [] };
+
+  // Find the tallest obstacle (largest h above the segment's direct line).
+  let bestH = -Infinity;
+  let bestIdx = -1;
+  let bestD1 = 0;
+  let bestD2 = 0;
+  for (let i = startIdx + 1; i < endIdx; i++) {
+    const d1 = distances[i] - xStart;
+    const d2 = xEnd - distances[i];
+    const lineY = yStart + (yEnd - yStart) * (d1 / totalLen);
+    const h = terrainHeights[i] - lineY;
+    if (h > bestH) {
+      bestH = h;
+      bestIdx = i;
+      bestD1 = d1;
+      bestD2 = d2;
+    }
+  }
+
+  // No obstacle intrudes — sub-path is clear.
+  if (bestIdx < 0 || bestH <= 0) return { totalLoss: 0, edges: [] };
+
+  const bestV = fresnelV(bestH, bestD1, bestD2, freqMHz);
+  const principalLoss = knifeEdgeLoss(bestH, bestD1, bestD2, freqMHz);
+  if (principalLoss <= 0) return { totalLoss: 0, edges: [] };
+
+  // ITU-R P.526 correction: scale this edge's loss based on how comparable
+  // it is to its parent. An edge much smaller than its parent contributes
+  // less (the parent's diffraction already accounts for it). For the outer
+  // call (parentV = Infinity), the scale factor is 1.
+  // The correction factor is a smooth roll-off based on v ratio:
+  //   - At depth 0 (principal of whole path): full contribution
+  //   - At depth ≥ 1: scale by tanh(v_self / v_parent), capped to 1
+  let scale = 1;
+  if (parentV !== Infinity && parentV > 0) {
+    const ratio = bestV / parentV;
+    // tanh gives a smooth 0→1 roll-off. ratio of 1 (equal heights) -> ~0.76,
+    // ratio of 0.5 -> ~0.46, ratio of 0.1 -> ~0.10. Sub-edges that are much
+    // smaller than the principal contribute very little.
+    scale = Math.tanh(Math.max(0, ratio));
+  }
+
+  const principalEdge = { index: bestIdx, lossDb: principalLoss * scale, v: bestV };
+
+  // Recurse on the two sub-segments with the obstacle as one endpoint.
+  const losMod = losHeights.slice();
+  losMod[bestIdx] = terrainHeights[bestIdx];
+
+  const left = deygoutDiffraction(startIdx, bestIdx, terrainHeights, losMod, distances, freqMHz, depth + 1, bestV);
+  const right = deygoutDiffraction(bestIdx, endIdx, terrainHeights, losMod, distances, freqMHz, depth + 1, bestV);
+
+  return {
+    totalLoss: principalEdge.lossDb + left.totalLoss + right.totalLoss,
+    edges: [principalEdge, ...left.edges, ...right.edges],
+  };
+}
+
+// ─── ENVIRONMENT CLUTTER ────────────────────────────────
+// SRTM elevation data gives bare-earth terrain. Real paths have additional
+// loss from vegetation, buildings, and other clutter that isn't in the DEM.
+// These are crude flat additions in dB — real clutter loss is frequency- and
+// geometry-dependent (ITU-R P.833 for vegetation, P.1411 for urban), and
+// also depends on path geometry (incidence angle, density, density variation).
+// We use a single number that captures the right order of magnitude.
+//
+// Important: radio signals don't pass straight through 10 km of forest. They
+// propagate over treetops, through gaps, and diffract around. So clutter loss
+// saturates — it does NOT scale linearly with distance or unboundedly with
+// frequency. We use a logarithmic frequency model that approaches a hard cap.
+//
+// Reference values (forested terrain, typical):
+//   VHF (150 MHz): ~7 dB     UHF (450 MHz): ~10 dB
+//   1 GHz: ~15 dB            2.4 GHz: ~19 dB
+//   5 GHz: ~22 dB            10 GHz: ~25 dB (cap)
+//
+// Returns extra loss in dB.
+const ENVIRONMENTS = {
+  open:     { name: 'Open',         baseDb: 0,  capDb: 0  },
+  suburban: { name: 'Suburban',     baseDb: 4,  capDb: 18 },
+  forested: { name: 'Forested',     baseDb: 7,  capDb: 25 },
+  urban:    { name: 'Urban',        baseDb: 10, capDb: 30 },
+};
+
+function environmentLoss(env, freqMHz) {
+  const e = ENVIRONMENTS[env] || ENVIRONMENTS.forested;
+  if (e.baseDb === 0) return 0;
+  // Raw value: starts at baseDb at 150 MHz, grows by ~5 dB per decade.
+  const freqGrowth = 5 * Math.log10(Math.max(freqMHz, 30) / 150);
+  const raw = e.baseDb + Math.max(0, freqGrowth);
+  // Smooth saturation: as raw approaches capDb, growth slows.
+  // value = cap - (cap - raw) * exp(-overshoot/scale)
+  // Below the cap this returns ~raw; well past it, it asymptotes to cap.
+  if (raw <= e.capDb) return raw;
+  const overshoot = raw - e.capDb;
+  return e.capDb - 5 * Math.exp(-overshoot / 10) + 5;
+}
+
+// Classify path geometry from total diffraction loss.
+// These thresholds are practical engineering guidelines based on diffraction
+// loss alone — they tell you about the path geometry, NOT whether your
+// specific radio will close the link. Whether a link actually works depends
+// on TX power, antenna gain, receiver sensitivity, noise environment, and
+// fading, none of which can be reliably estimated from a map alone.
+//   < 6 dB:  essentially free-space conditions
+//   6-15 dB: mild diffraction, common for slightly obstructed paths
+//   15-25 dB: significant diffraction, needs good equipment
+//   > 25 dB: severe diffraction, path is challenging
+function classifyPath(diffractionDb) {
+  if (diffractionDb < 6)  return { label: 'Clear Path',        cls: 'go' };
+  if (diffractionDb < 15) return { label: 'Light Obstruction', cls: 'go' };
+  if (diffractionDb < 25) return { label: 'Heavy Obstruction', cls: 'maybe' };
+  return                  { label: 'Severe Obstruction',       cls: 'no' };
+}
+
+// ─── ANALYSIS ───────────────────────────────────────────
+document.getElementById('btn-analyze').addEventListener('click', runAnalysis);
+
+async function runAnalysis() {
+  if (!state.pointA || !state.pointB) return;
+
+  const loader = document.getElementById('loader');
+  loader.classList.add('active');
+  document.getElementById('btn-analyze').disabled = true;
+
+  try {
+    const totalDist = haversineDistance(state.pointA, state.pointB);
+
+    // Sample count — between 50 and 150 based on distance.
+    // 1 sample per 500m for short paths, capped at 150 for long paths to
+    // stay well within free elevation API limits. The underlying SRTM data
+    // is ~30m resolution, so more samples don't add real detail anyway.
+    const N = Math.max(50, Math.min(150, Math.round(totalDist / 500)));
+
+    // Build sample points along path
+    const samples = [];
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      samples.push(interpolate(state.pointA, state.pointB, t));
+    }
+
+    // Fetch elevations
+    const elevations = await fetchElevationsWithFallback(samples);
+    document.getElementById('meta-samples').textContent = String(samples.length);
+
+    // Build distance array (m)
+    const distances = samples.map((_, i) => (i / N) * totalDist);
+
+    // Read inputs
+    const hA = parseFloat(document.getElementById('height-a').value) || 0;
+    const hB = parseFloat(document.getElementById('height-b').value) || 0;
+    const freqMHz = parseFloat(document.getElementById('frequency').value) || 144;
+    const environment = document.getElementById('environment').value;
+
+    // Terminal elevations (ground + antenna)
+    const groundA = elevations[0];
+    const groundB = elevations[elevations.length - 1];
+    const txElev = groundA + hA;
+    const rxElev = groundB + hB;
+
+    // Compute line-of-sight, Fresnel zone, Earth curve, terrain clearance
+    const losLine = [];
+    const fresnelUpper = [];
+    const fresnelLower = [];
+    const earthCurve = [];
+    const terrainAdjusted = []; // terrain + earth bulge (for clearance check)
+    let maxObstacleClearance = Infinity; // smallest LOS clearance (negative = obstruction)
+    let worstFresnelClearance = Infinity; // smallest 60%-Fresnel clearance
+
+    for (let i = 0; i < samples.length; i++) {
+      const d1 = distances[i];
+      const d2 = totalDist - d1;
+      const bulge = earthBulge(d1, totalDist);
+
+      // Linear LOS line between txElev and rxElev (straight-line sense)
+      const losHeight = txElev + (rxElev - txElev) * (d1 / totalDist);
+      const fr = fresnelRadius(d1, d2, freqMHz);
+
+      losLine.push(losHeight);
+      fresnelUpper.push(losHeight + fr);
+      fresnelLower.push(losHeight - fr);
+      // Plot terrain "lifted" by Earth bulge so the LOS appears as a straight
+      // line — standard convention for path profile charts.
+      const terrainWithBulge = elevations[i] + bulge;
+      terrainAdjusted.push(terrainWithBulge);
+      earthCurve.push(bulge);
+
+      // Track worst-case clearance values for the verdict text
+      const clearance = losHeight - terrainWithBulge;
+      if (clearance < maxObstacleClearance) maxObstacleClearance = clearance;
+      const fresnelClearance = clearance - 0.6 * fr;
+      if (fresnelClearance < worstFresnelClearance) worstFresnelClearance = fresnelClearance;
+    }
+
+    // Multi-obstacle diffraction loss using the Deygout method.
+    // Falls back gracefully on clear paths (returns 0).
+    const deygoutResult = deygoutDiffraction(
+      0, samples.length - 1, terrainAdjusted, losLine, distances, freqMHz
+    );
+    const diffractionLoss = deygoutResult.totalLoss;
+
+    // Find the principal (worst) obstacle for display purposes.
+    // The first edge returned by deygoutDiffraction is the principal one.
+    let principalEdge = deygoutResult.edges[0];
+    if (!principalEdge) {
+      // No significant obstacles — fall back to whatever was geometrically closest
+      principalEdge = { index: 0, lossDb: 0, v: 0 };
+    }
+    const principalDist = distances[principalEdge.index];
+
+    // Clutter / environment loss from vegetation, buildings, etc. SRTM is bare-
+    // earth so this is added separately. Crude but useful.
+    const clutterLoss = environmentLoss(environment, freqMHz);
+    const totalLoss = diffractionLoss + clutterLoss;
+
+    // Verdict is based on total path loss (diffraction + clutter), which is
+    // what we can compute from a map. We deliberately do NOT estimate whether
+    // a specific radio will close the link, since that depends on TX power,
+    // antenna gain, RX sensitivity, noise, and fading — none of which can be
+    // reliably estimated from a map alone.
+    const { label: verdictLabel, cls: verdictClass } = classifyPath(totalLoss);
+
+    // Build verdict detail
+    const losBlocked = maxObstacleClearance < 0;
+    const fresnelBlocked = worstFresnelClearance < 0;
+    const obsKm = (principalDist / 1000).toFixed(2);
+    const envName = (ENVIRONMENTS[environment] || ENVIRONMENTS.forested).name.toLowerCase();
+    const edgeCount = deygoutResult.edges.length;
+    const clutterNote = clutterLoss >= 0.5 ? ` Plus ~${clutterLoss.toFixed(1)} dB from ${envName} clutter.` : '';
+    const obstacleCountNote = edgeCount > 1 ? ` (${edgeCount} obstacles, Deygout method)` : '';
+
+    let verdictDetail;
+    if (totalLoss < 6) {
+      if (!fresnelBlocked) {
+        verdictDetail = `Clear line of sight with 60%+ Fresnel zone clearance — essentially free-space conditions at ${freqMHz} MHz.${clutterNote}`;
+      } else {
+        verdictDetail = `Line of sight clear; Fresnel zone partially obstructed but with only ~${totalLoss.toFixed(1)} dB extra loss beyond free space.${clutterNote}`;
+      }
+    } else if (totalLoss < 15) {
+      if (losBlocked) {
+        verdictDetail = `Terrain blocks line of sight by ${Math.abs(maxObstacleClearance).toFixed(0)}m at ${obsKm}km from A, but at ${freqMHz} MHz the signal diffracts over with about ${diffractionLoss.toFixed(1)} dB diffraction loss${obstacleCountNote}.${clutterNote} Most equipment should still close this path.`;
+      } else {
+        verdictDetail = `Significant Fresnel zone obstruction causing ~${diffractionLoss.toFixed(1)} dB diffraction loss${obstacleCountNote}.${clutterNote}`;
+      }
+    } else if (totalLoss < 25) {
+      verdictDetail = `Path costs ~${totalLoss.toFixed(1)} dB excess loss above free space at ${freqMHz} MHz (${diffractionLoss.toFixed(1)} dB diffraction${obstacleCountNote}, worst obstacle ${obsKm}km from A).${clutterNote} Workable but needs good equipment and adequate transmit power.`;
+    } else {
+      verdictDetail = `Severe excess loss: ~${totalLoss.toFixed(1)} dB above free space at ${freqMHz} MHz (${diffractionLoss.toFixed(1)} dB diffraction${obstacleCountNote}).${clutterNote} Challenging — consider a relay, higher antennas, or lower frequency.`;
+    }
+
+    // Fresnel radius at midpoint (representative)
+    const midFresnel = fresnelRadius(totalDist/2, totalDist/2, freqMHz);
+    const fsplVal = fspl(totalDist, freqMHz);
+    const brg = bearing(state.pointA, state.pointB);
+
+    // Update report UI
+    document.getElementById('report-section').style.display = 'block';
+    const dot = document.getElementById('verdict-dot');
+    dot.className = 'verdict-dot ' + verdictClass;
+    document.getElementById('verdict-label').textContent = verdictLabel;
+    document.getElementById('verdict-detail').textContent = verdictDetail;
+
+    document.getElementById('stat-distance').innerHTML = `${(totalDist/1000).toFixed(2)} <span class="unit">km</span>`;
+    document.getElementById('stat-bearing').innerHTML = `${brg.toFixed(1)} <span class="unit">°</span>`;
+    document.getElementById('stat-delta').innerHTML = `${(rxElev - txElev >= 0 ? '+' : '')}${(rxElev - txElev).toFixed(0)} <span class="unit">m</span>`;
+    document.getElementById('stat-obstacle').innerHTML = `${maxObstacleClearance < 0 ? '−' + Math.abs(maxObstacleClearance).toFixed(0) : '+' + maxObstacleClearance.toFixed(0)} <span class="unit">m</span>`;
+    document.getElementById('stat-fresnel').innerHTML = `${midFresnel.toFixed(1)} <span class="unit">m</span>`;
+    document.getElementById('stat-diffraction').innerHTML = `${diffractionLoss.toFixed(1)} <span class="unit">dB</span>`;
+    document.getElementById('stat-clutter').innerHTML = `${clutterLoss.toFixed(1)} <span class="unit">dB</span>`;
+    document.getElementById('stat-fspl').innerHTML = `${fsplVal.toFixed(1)} <span class="unit">dB</span>`;
+    document.getElementById('stat-total').innerHTML = `${(fsplVal + totalLoss).toFixed(1)} <span class="unit">dB</span>`;
+
+    // Clear old obstacle markers, then drop new ones for each Deygout edge.
+    // The principal edge gets a larger marker; sub-edges get smaller ones.
+    if (state.obstacleMarkers) {
+      state.obstacleMarkers.forEach(m => map.removeLayer(m));
+    }
+    state.obstacleMarkers = [];
+    if (diffractionLoss > 1) {
+      deygoutResult.edges.forEach((edge, i) => {
+        if (edge.lossDb < 0.5) return;
+        const frac = distances[edge.index] / totalDist;
+        const pt = interpolate(state.pointA, state.pointB, frac);
+        const isPrincipal = i === 0;
+        const marker = L.circleMarker(pt, {
+          radius: isPrincipal ? 8 : 5,
+          color: '#c4604a',
+          fillColor: '#c4604a',
+          fillOpacity: isPrincipal ? 0.9 : 0.6,
+          weight: 2,
+        }).addTo(map);
+        marker.bindTooltip(
+          isPrincipal
+            ? `Principal obstacle: ${edge.lossDb.toFixed(1)} dB loss`
+            : `Secondary obstacle: ${edge.lossDb.toFixed(1)} dB loss`,
+          { permanent: false, direction: 'top', offset: [0, -8] }
+        );
+        state.obstacleMarkers.push(marker);
+      });
+    }
+
+    // Build chart — pass principal obstacle distance for the vertical marker
+    renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUpper, fresnelLower, earthCurve, samples, principalDist);
+
+  } catch (err) {
+    console.error(err);
+    alert('Failed to fetch terrain data: ' + err.message + '\n\nThe elevation service may be temporarily unavailable. Please try again in a moment.');
+  } finally {
+    loader.classList.remove('active');
+    document.getElementById('btn-analyze').disabled = false;
+  }
+}
+
+// ─── CHART ──────────────────────────────────────────────
+function renderChart(distances, elevations, terrainAdjusted, losLine, fresnelUp, fresnelLow, earthCurve, samples, worstObstacleDist) {
+  document.getElementById('chart-empty').style.display = 'none';
+  const canvas = document.getElementById('profile-chart');
+  canvas.style.display = 'block';
+
+  if (state.chart) state.chart.destroy();
+
+  const distKm = distances.map(d => d / 1000);
+
+  // Determine y-axis bottom: a bit below the lowest terrain point
+  const allLow = Math.min(...elevations, ...fresnelLow);
+  const allHigh = Math.max(...elevations, ...terrainAdjusted, ...fresnelUp, ...losLine);
+  const range = allHigh - allLow;
+  const yMin = allLow - range * 0.05;
+
+  const ctx = canvas.getContext('2d');
+
+  // Chart.js plugin to draw a dashed vertical line at the worst-obstacle
+  // location, with a small label. Cursor sync to the map is handled
+  // separately via the onHover callback below.
+  const worstObstaclePlugin = {
+    id: 'worstObstacle',
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      if (typeof worstObstacleDist !== 'number' || worstObstacleDist <= 0) return;
+      const x = scales.x.getPixelForValue(worstObstacleDist / 1000);
+      if (x < chartArea.left || x > chartArea.right) return;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(196, 96, 74, 0.6)';
+      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, chartArea.top);
+      ctx.lineTo(x, chartArea.bottom);
+      ctx.stroke();
+      ctx.fillStyle = '#c4604a';
+      ctx.font = '10px JetBrains Mono';
+      ctx.textAlign = 'center';
+      ctx.fillText('worst obstacle', x, chartArea.top - 4);
+      ctx.restore();
+    },
+  };
+
+  state.chart = new Chart(ctx, {
+    type: 'line',
+    plugins: [worstObstaclePlugin],
+    data: {
+      labels: distKm,
+      datasets: [
+        // Fresnel upper bound (invisible, used as upper edge for fill)
+        {
+          label: 'Fresnel Upper',
+          data: fresnelUp,
+          borderColor: 'rgba(111,174,111,0.4)',
+          backgroundColor: 'rgba(111,174,111,0.08)',
+          borderWidth: 1,
+          fill: '+1', // fill toward next dataset (fresnel lower)
+          pointRadius: 0,
+          tension: 0,
+        },
+        // Fresnel lower bound
+        {
+          label: 'Fresnel Lower',
+          data: fresnelLow,
+          borderColor: 'rgba(111,174,111,0.4)',
+          borderWidth: 1,
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+        },
+        // Line of sight (straight)
+        {
+          label: 'Line of Sight',
+          data: losLine,
+          borderColor: '#d4a04a',
+          borderWidth: 2,
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+        },
+        // Earth curve (relative to LOS midline, dashed reference)
+        {
+          label: 'Earth Curve',
+          data: earthCurve.map((b, i) => elevations[0] + b), // shown above the start elevation
+          borderColor: 'rgba(138,141,128,0.5)',
+          borderWidth: 1,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+          hidden: false,
+        },
+        // Terrain (filled) — adjusted with earth bulge so LOS stays straight
+        {
+          label: 'Terrain',
+          data: terrainAdjusted,
+          borderColor: '#8a6a3f',
+          backgroundColor: 'rgba(90,69,48,0.55)',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: 'start',
+          tension: 0.15,
+          order: 10,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      animation: { duration: 600, easing: 'easeOutQuart' },
+      // When the user hovers a point on the chart, drop a marker at the
+      // corresponding location on the map. Lets you correlate "that hill
+      // at 4.2 km" with a specific geographic spot.
+      onHover: (event, activeElements) => {
+        if (!activeElements || activeElements.length === 0) return;
+        const idx = activeElements[0].index;
+        if (idx == null || !samples[idx]) return;
+        const pt = samples[idx];
+        if (state.hoverMarker) {
+          state.hoverMarker.setLatLng(pt);
+        } else {
+          state.hoverMarker = L.circleMarker(pt, {
+            radius: 6,
+            color: '#d4a04a',
+            fillColor: '#d4a04a',
+            fillOpacity: 1,
+            weight: 2,
+          }).addTo(map);
+        }
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: 'rgba(13,16,15,0.95)',
+          borderColor: '#2a312d',
+          borderWidth: 1,
+          titleFont: { family: 'JetBrains Mono', size: 11, weight: '500' },
+          bodyFont: { family: 'JetBrains Mono', size: 11 },
+          titleColor: '#d4a04a',
+          bodyColor: '#e8e4d8',
+          padding: 10,
+          cornerRadius: 0,
+          displayColors: true,
+          callbacks: {
+            title: (items) => `${parseFloat(items[0].label).toFixed(2)} km from A`,
+            label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} m`,
+          },
+          filter: (item) => item.dataset.label !== 'Fresnel Upper',
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          title: { display: true, text: 'DISTANCE FROM A (km)', font: { family: 'JetBrains Mono', size: 9, weight: '400' }, color: '#8a8d80' },
+          ticks: {
+            color: '#8a8d80',
+            font: { family: 'JetBrains Mono', size: 10 },
+            callback: (v) => v.toFixed(1),
+          },
+          grid: { color: 'rgba(42,49,45,0.6)', drawBorder: false },
+        },
+        y: {
+          min: yMin,
+          title: { display: true, text: 'ELEVATION (m)', font: { family: 'JetBrains Mono', size: 9, weight: '400' }, color: '#8a8d80' },
+          ticks: {
+            color: '#8a8d80',
+            font: { family: 'JetBrains Mono', size: 10 },
+            callback: (v) => Math.round(v),
+          },
+          grid: { color: 'rgba(42,49,45,0.6)', drawBorder: false },
+        },
+      },
+    },
+  });
+
+  // Remove the map hover marker when the cursor leaves the chart area
+  canvas.onmouseleave = () => {
+    if (state.hoverMarker) {
+      map.removeLayer(state.hoverMarker);
+      state.hoverMarker = null;
+    }
+  };
+}
+
+updatePointDisplays();
+
+// Wire up input changes to update the permalink as the user adjusts settings
+['frequency', 'height-a', 'height-b', 'environment'].forEach(id => {
+  document.getElementById(id).addEventListener('change', encodeStateToHash);
+});
+
+// On page load, try to restore state from the URL hash. If we restored a path,
+// suppress the IP-based location guess (we've already positioned the map).
+const restored = decodeStateFromHash();
+if (restored) userHasInteracted = true;
+
+// ─── FONT SCALING ───────────────────────────────────────
+// Discrete scale steps for text in the side panel. Bounded so users can't
+// scale into unusable territory. The chosen scale persists across sessions.
+const FONT_SCALES = [1.0, 1.15, 1.3, 1.5, 1.75];
+const FONT_SCALE_KEY = 'tp-font-scale';
+let fontScaleIdx = 0;
+
+function applyFontScale() {
+  const scale = FONT_SCALES[fontScaleIdx];
+  document.documentElement.style.setProperty('--font-scale', scale);
+  // Disable the +/- buttons at the extremes so the user gets visual feedback
+  document.getElementById('btn-font-down').disabled = (fontScaleIdx === 0);
+  document.getElementById('btn-font-up').disabled = (fontScaleIdx === FONT_SCALES.length - 1);
+  try { localStorage.setItem(FONT_SCALE_KEY, String(fontScaleIdx)); } catch {}
+}
+
+// Restore saved scale, if any
+try {
+  const saved = parseInt(localStorage.getItem(FONT_SCALE_KEY), 10);
+  if (!isNaN(saved) && saved >= 0 && saved < FONT_SCALES.length) fontScaleIdx = saved;
+} catch {}
+applyFontScale();
+
+document.getElementById('btn-font-up').addEventListener('click', () => {
+  if (fontScaleIdx < FONT_SCALES.length - 1) { fontScaleIdx++; applyFontScale(); }
+});
+document.getElementById('btn-font-down').addEventListener('click', () => {
+  if (fontScaleIdx > 0) { fontScaleIdx--; applyFontScale(); }
+});
+</script>
+</body>
+</html>
